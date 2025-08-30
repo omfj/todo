@@ -9,7 +9,7 @@ use ratatui::{
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::Span,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::io;
@@ -586,15 +586,24 @@ fn ui(f: &mut Frame, app: &mut App) {
         .map(|td| {
             let indent = "  ".repeat(td.level);
             let checkbox = if td.task.completed { "×" } else { " " };
-            let text = format!("{}[{}] {}", indent, checkbox, td.task.title);
+            let date = td.task.created_at.format("%m/%d/%y").to_string();
+            
+            let task_span = Span::raw(format!("{}[{}] {}", indent, checkbox, td.task.title));
+            let date_span = Span::styled(
+                format!(" ({})", date),
+                Style::default().fg(Color::DarkGray)
+            );
             
             if td.task.completed {
-                ListItem::new(Span::styled(
-                    text,
-                    Style::default().add_modifier(Modifier::CROSSED_OUT).fg(Color::DarkGray)
-                ))
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        format!("{}[{}] {}", indent, checkbox, td.task.title),
+                        Style::default().add_modifier(Modifier::CROSSED_OUT).fg(Color::DarkGray)
+                    ),
+                    date_span
+                ]))
             } else {
-                ListItem::new(Span::raw(text))
+                ListItem::new(Line::from(vec![task_span, date_span]))
             }
         })
         .collect();
