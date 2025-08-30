@@ -8,7 +8,7 @@ pub struct Db {
 impl Db {
     pub async fn connect() -> anyhow::Result<Self> {
         let config_dir = dirs::state_dir()
-            .or_else(|| dirs::config_dir())
+            .or_else(dirs::config_dir)
             .or_else(|| dirs::home_dir().map(|h| h.join(".local/state")))
             .ok_or_else(|| anyhow::anyhow!("Could not find config directory"))?;
 
@@ -67,15 +67,19 @@ impl Db {
         Ok(result.last_insert_rowid())
     }
 
-    pub async fn create_subtask(&self, title: &str, workspace_id: i64, parent_task_id: i64) -> anyhow::Result<i64> {
-        let result = sqlx::query(
-            "INSERT INTO tasks (title, workspace_id, parent_task_id) VALUES (?, ?, ?)"
-        )
-        .bind(title)
-        .bind(workspace_id)
-        .bind(parent_task_id)
-        .execute(&self.pool)
-        .await?;
+    pub async fn create_subtask(
+        &self,
+        title: &str,
+        workspace_id: i64,
+        parent_task_id: i64,
+    ) -> anyhow::Result<i64> {
+        let result =
+            sqlx::query("INSERT INTO tasks (title, workspace_id, parent_task_id) VALUES (?, ?, ?)")
+                .bind(title)
+                .bind(workspace_id)
+                .bind(parent_task_id)
+                .execute(&self.pool)
+                .await?;
 
         Ok(result.last_insert_rowid())
     }

@@ -90,8 +90,11 @@ impl App {
             if let Some(workspace) = self.workspaces.get(selected) {
                 self.tasks = self.db.get_tasks_for_workspace(workspace.id).await?;
                 self.build_task_hierarchy();
-                self.task_state
-                    .select(if self.task_displays.is_empty() { None } else { Some(0) });
+                self.task_state.select(if self.task_displays.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
             }
         }
         Ok(())
@@ -100,51 +103,62 @@ impl App {
     fn build_task_hierarchy(&mut self) {
         self.task_displays.clear();
         let tasks = self.tasks.clone();
-        
-        let mut incomplete_root_tasks: Vec<Task> = tasks.iter()
+
+        let mut incomplete_root_tasks: Vec<Task> = tasks
+            .iter()
             .filter(|t| !t.completed && t.parent_task_id.is_none())
             .cloned()
             .collect();
         incomplete_root_tasks.sort_by_key(|t| t.created_at);
-        
-        let mut completed_root_tasks: Vec<Task> = tasks.iter()
+
+        let mut completed_root_tasks: Vec<Task> = tasks
+            .iter()
             .filter(|t| t.completed && t.parent_task_id.is_none())
             .cloned()
             .collect();
         completed_root_tasks.sort_by_key(|t| t.created_at);
-        
+
         let mut index = 0;
-        
+
         for task in incomplete_root_tasks {
             self.add_task_and_children(&tasks, &task, 0, &mut index);
         }
-        
+
         for task in completed_root_tasks {
             self.add_task_and_children(&tasks, &task, 0, &mut index);
         }
     }
-    
-    fn add_task_and_children(&mut self, all_tasks: &[Task], task: &Task, level: usize, index: &mut usize) {
+
+    fn add_task_and_children(
+        &mut self,
+        all_tasks: &[Task],
+        task: &Task,
+        level: usize,
+        index: &mut usize,
+    ) {
         self.task_displays.push(TaskDisplay {
             task: task.clone(),
             level,
             index: *index,
         });
         *index += 1;
-        
-        let mut children: Vec<Task> = all_tasks.iter()
+
+        let mut children: Vec<Task> = all_tasks
+            .iter()
             .filter(|t| t.parent_task_id == Some(task.id))
             .cloned()
             .collect();
         children.sort_by_key(|t| t.created_at);
-        
-        let incomplete_children: Vec<Task> = children.iter().filter(|t| !t.completed).cloned().collect();
-        let completed_children: Vec<Task> = children.iter().filter(|t| t.completed).cloned().collect();
-        
+
+        let incomplete_children: Vec<Task> =
+            children.iter().filter(|t| !t.completed).cloned().collect();
+        let completed_children: Vec<Task> =
+            children.iter().filter(|t| t.completed).cloned().collect();
+
         for child in incomplete_children {
             self.add_task_and_children(all_tasks, &child, level + 1, index);
         }
-        
+
         for child in completed_children {
             self.add_task_and_children(all_tasks, &child, level + 1, index);
         }
@@ -240,16 +254,29 @@ impl App {
                     if let Some(workspace) = self.workspaces.get(selected) {
                         if self.creating_subtask {
                             if let Some(task_display_idx) = self.task_state.selected() {
-                                if let Some(task_display) = self.task_displays.get(task_display_idx) {
-                                    self.db.create_subtask(&self.input_buffer, workspace.id, task_display.task.id).await?;
+                                if let Some(task_display) = self.task_displays.get(task_display_idx)
+                                {
+                                    self.db
+                                        .create_subtask(
+                                            &self.input_buffer,
+                                            workspace.id,
+                                            task_display.task.id,
+                                        )
+                                        .await?;
                                 } else {
-                                    self.db.create_task(&self.input_buffer, workspace.id).await?;
+                                    self.db
+                                        .create_task(&self.input_buffer, workspace.id)
+                                        .await?;
                                 }
                             } else {
-                                self.db.create_task(&self.input_buffer, workspace.id).await?;
+                                self.db
+                                    .create_task(&self.input_buffer, workspace.id)
+                                    .await?;
                             }
                         } else {
-                            self.db.create_task(&self.input_buffer, workspace.id).await?;
+                            self.db
+                                .create_task(&self.input_buffer, workspace.id)
+                                .await?;
                         }
                         self.load_tasks_for_selected_workspace().await?;
                     }
@@ -581,26 +608,27 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(workspaces, content_chunks[0], &mut app.workspace_state);
 
-    let task_items: Vec<ListItem> = app.task_displays
+    let task_items: Vec<ListItem> = app
+        .task_displays
         .iter()
         .map(|td| {
             let indent = "  ".repeat(td.level);
             let checkbox = if td.task.completed { "×" } else { " " };
             let date = td.task.created_at.format("%m/%d/%y").to_string();
-            
+
             let task_span = Span::raw(format!("{}[{}] {}", indent, checkbox, td.task.title));
-            let date_span = Span::styled(
-                format!(" ({})", date),
-                Style::default().fg(Color::DarkGray)
-            );
-            
+            let date_span =
+                Span::styled(format!(" ({date})"), Style::default().fg(Color::DarkGray));
+
             if td.task.completed {
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         format!("{}[{}] {}", indent, checkbox, td.task.title),
-                        Style::default().add_modifier(Modifier::CROSSED_OUT).fg(Color::DarkGray)
+                        Style::default()
+                            .add_modifier(Modifier::CROSSED_OUT)
+                            .fg(Color::DarkGray),
                     ),
-                    date_span
+                    date_span,
                 ]))
             } else {
                 ListItem::new(Line::from(vec![task_span, date_span]))
@@ -639,7 +667,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(Clear, popup_area);
 
             let target_name = app.delete_target.as_deref().unwrap_or("item");
-            let confirm_text = format!("Delete '{}'?\n\ny: confirm | n/esc: cancel", target_name);
+            let confirm_text = format!("Delete '{target_name}'?\n\ny: confirm | n/esc: cancel");
             let confirm = Paragraph::new(confirm_text)
                 .block(
                     Block::default()
