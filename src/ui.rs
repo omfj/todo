@@ -1,21 +1,28 @@
 use anyhow::Result;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     crossterm::{
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear},
-    Frame, Terminal,
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::io;
 
-use crate::models::{Task, Workspace};
 use crate::db::Db;
+use crate::models::{Task, Workspace};
+
+#[derive(Debug, Clone)]
+struct TaskDisplay {
+    task: Task,
+    level: usize,
+    index: usize,
+}
 
 #[derive(PartialEq)]
 pub enum Focus {
@@ -35,6 +42,7 @@ pub enum InputMode {
 pub struct App {
     pub workspaces: Vec<Workspace>,
     pub tasks: Vec<Task>,
+    pub task_displays: Vec<TaskDisplay>,
     pub workspace_state: ListState,
     pub task_state: ListState,
     pub selected_workspace: Option<usize>,
@@ -43,16 +51,18 @@ pub struct App {
     pub input_mode: InputMode,
     pub input_buffer: String,
     pub delete_target: Option<String>,
+    pub creating_subtask: bool,
 }
 
 impl App {
     pub fn new(db: Db) -> Self {
         let mut workspace_state = ListState::default();
         workspace_state.select(Some(0));
-        
+
         Self {
             workspaces: vec![],
             tasks: vec![],
+            task_displays: vec![],
             workspace_state,
             task_state: ListState::default(),
             selected_workspace: Some(0),
@@ -61,6 +71,7 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             delete_target: None,
+            creating_subtask: false,
         }
     }
 
@@ -78,10 +89,65 @@ impl App {
         if let Some(selected) = self.selected_workspace {
             if let Some(workspace) = self.workspaces.get(selected) {
                 self.tasks = self.db.get_tasks_for_workspace(workspace.id).await?;
-                self.task_state.select(if self.tasks.is_empty() { None } else { Some(0) });
+                self.build_task_hierarchy();
+                self.task_state
+                    .select(if self.task_displays.is_empty() { None } else { Some(0) });
             }
         }
         Ok(())
+    }
+
+    fn build_task_hierarchy(&mut self) {
+        self.task_displays.clear();
+        let tasks = self.tasks.clone();
+        
+        let mut incomplete_root_tasks: Vec<Task> = tasks.iter()
+            .filter(|t| !t.completed && t.parent_task_id.is_none())
+            .cloned()
+            .collect();
+        incomplete_root_tasks.sort_by_key(|t| t.created_at);
+        
+        let mut completed_root_tasks: Vec<Task> = tasks.iter()
+            .filter(|t| t.completed && t.parent_task_id.is_none())
+            .cloned()
+            .collect();
+        completed_root_tasks.sort_by_key(|t| t.created_at);
+        
+        let mut index = 0;
+        
+        for task in incomplete_root_tasks {
+            self.add_task_and_children(&tasks, &task, 0, &mut index);
+        }
+        
+        for task in completed_root_tasks {
+            self.add_task_and_children(&tasks, &task, 0, &mut index);
+        }
+    }
+    
+    fn add_task_and_children(&mut self, all_tasks: &[Task], task: &Task, level: usize, index: &mut usize) {
+        self.task_displays.push(TaskDisplay {
+            task: task.clone(),
+            level,
+            index: *index,
+        });
+        *index += 1;
+        
+        let mut children: Vec<Task> = all_tasks.iter()
+            .filter(|t| t.parent_task_id == Some(task.id))
+            .cloned()
+            .collect();
+        children.sort_by_key(|t| t.created_at);
+        
+        let incomplete_children: Vec<Task> = children.iter().filter(|t| !t.completed).cloned().collect();
+        let completed_children: Vec<Task> = children.iter().filter(|t| t.completed).cloned().collect();
+        
+        for child in incomplete_children {
+            self.add_task_and_children(all_tasks, &child, level + 1, index);
+        }
+        
+        for child in completed_children {
+            self.add_task_and_children(all_tasks, &child, level + 1, index);
+        }
     }
 
     pub async fn next_workspace(&mut self) -> Result<()> {
@@ -121,7 +187,7 @@ impl App {
     pub fn next_task(&mut self) {
         let i = match self.task_state.selected() {
             Some(i) => {
-                if i >= self.tasks.len() - 1 {
+                if i >= self.task_displays.len() - 1 {
                     0
                 } else {
                     i + 1
@@ -136,7 +202,7 @@ impl App {
         let i = match self.task_state.selected() {
             Some(i) => {
                 if i == 0 {
-                    self.tasks.len() - 1
+                    self.task_displays.len() - 1
                 } else {
                     i - 1
                 }
@@ -146,8 +212,15 @@ impl App {
         self.task_state.select(Some(i));
     }
 
-    pub fn start_creating(&mut self) {
+    pub fn start_creating_subtask(&mut self) {
         self.input_buffer.clear();
+        self.creating_subtask = true;
+        self.input_mode = InputMode::Creating;
+    }
+
+    pub fn start_creating_task(&mut self) {
+        self.input_buffer.clear();
+        self.creating_subtask = false;
         self.input_mode = InputMode::Creating;
     }
 
@@ -165,7 +238,19 @@ impl App {
             Focus::Tasks => {
                 if let Some(selected) = self.selected_workspace {
                     if let Some(workspace) = self.workspaces.get(selected) {
-                        self.db.create_task(&self.input_buffer, workspace.id).await?;
+                        if self.creating_subtask {
+                            if let Some(task_display_idx) = self.task_state.selected() {
+                                if let Some(task_display) = self.task_displays.get(task_display_idx) {
+                                    self.db.create_subtask(&self.input_buffer, workspace.id, task_display.task.id).await?;
+                                } else {
+                                    self.db.create_task(&self.input_buffer, workspace.id).await?;
+                                }
+                            } else {
+                                self.db.create_task(&self.input_buffer, workspace.id).await?;
+                            }
+                        } else {
+                            self.db.create_task(&self.input_buffer, workspace.id).await?;
+                        }
                         self.load_tasks_for_selected_workspace().await?;
                     }
                 }
@@ -183,8 +268,8 @@ impl App {
     pub async fn toggle_current_task_completion(&mut self) -> Result<()> {
         if self.focus == Focus::Tasks {
             if let Some(selected_task_idx) = self.task_state.selected() {
-                if let Some(task) = self.tasks.get(selected_task_idx) {
-                    self.db.toggle_task_completion(task.id).await?;
+                if let Some(task_display) = self.task_displays.get(selected_task_idx) {
+                    self.db.toggle_task_completion(task_display.task.id).await?;
                     let current_selection = self.task_state.selected();
                     self.load_tasks_for_selected_workspace().await?;
                     self.task_state.select(current_selection);
@@ -198,14 +283,20 @@ impl App {
         let current_name = match self.focus {
             Focus::Workspaces => {
                 if let Some(selected) = self.workspace_state.selected() {
-                    self.workspaces.get(selected).map(|w| w.name.clone()).unwrap_or_default()
+                    self.workspaces
+                        .get(selected)
+                        .map(|w| w.name.clone())
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
             }
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
-                    self.tasks.get(selected).map(|t| t.title.clone()).unwrap_or_default()
+                    self.task_displays
+                        .get(selected)
+                        .map(|td| td.task.title.clone())
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 }
@@ -220,15 +311,19 @@ impl App {
             Focus::Workspaces => {
                 if let Some(selected) = self.workspace_state.selected() {
                     if let Some(workspace) = self.workspaces.get(selected) {
-                        self.db.update_workspace_name(workspace.id, &self.input_buffer).await?;
+                        self.db
+                            .update_workspace_name(workspace.id, &self.input_buffer)
+                            .await?;
                         self.load_workspaces().await?;
                     }
                 }
             }
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
-                    if let Some(task) = self.tasks.get(selected) {
-                        self.db.update_task_name(task.id, &self.input_buffer).await?;
+                    if let Some(task_display) = self.task_displays.get(selected) {
+                        self.db
+                            .update_task_name(task_display.task.id, &self.input_buffer)
+                            .await?;
                         self.load_tasks_for_selected_workspace().await?;
                     }
                 }
@@ -248,14 +343,20 @@ impl App {
         let target_name = match self.focus {
             Focus::Workspaces => {
                 if let Some(selected) = self.workspace_state.selected() {
-                    self.workspaces.get(selected).map(|w| w.name.clone()).unwrap_or_default()
+                    self.workspaces
+                        .get(selected)
+                        .map(|w| w.name.clone())
+                        .unwrap_or_default()
                 } else {
                     return;
                 }
             }
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
-                    self.tasks.get(selected).map(|t| t.title.clone()).unwrap_or_default()
+                    self.task_displays
+                        .get(selected)
+                        .map(|td| td.task.title.clone())
+                        .unwrap_or_default()
                 } else {
                     return;
                 }
@@ -287,12 +388,12 @@ impl App {
             }
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
-                    if let Some(task) = self.tasks.get(selected) {
-                        self.db.delete_task(task.id).await?;
+                    if let Some(task_display) = self.task_displays.get(selected) {
+                        self.db.delete_task(task_display.task.id).await?;
                         self.load_tasks_for_selected_workspace().await?;
-                        if !self.tasks.is_empty() {
-                            let new_selection = if selected >= self.tasks.len() {
-                                self.tasks.len() - 1
+                        if !self.task_displays.is_empty() {
+                            let new_selection = if selected >= self.task_displays.len() {
+                                self.task_displays.len() - 1
                             } else {
                                 selected
                             };
@@ -329,7 +430,7 @@ pub async fn run_app(db: Db) -> Result<()> {
 
     let mut app = App::new(db);
     app.load_workspaces().await?;
-    
+
     let res = run_app_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
@@ -358,18 +459,14 @@ async fn run_app_loop(
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        match app.focus {
-                            Focus::Workspaces => app.next_workspace().await?,
-                            Focus::Tasks => app.next_task(),
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        match app.focus {
-                            Focus::Workspaces => app.previous_workspace().await?,
-                            Focus::Tasks => app.previous_task(),
-                        }
-                    }
+                    KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                        Focus::Workspaces => app.next_workspace().await?,
+                        Focus::Tasks => app.next_task(),
+                    },
+                    KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                        Focus::Workspaces => app.previous_workspace().await?,
+                        Focus::Tasks => app.previous_task(),
+                    },
                     KeyCode::Right | KeyCode::Char('l') => {
                         app.focus = Focus::Tasks;
                     }
@@ -383,7 +480,14 @@ async fn run_app_loop(
                         };
                     }
                     KeyCode::Char('a') => {
-                        app.start_creating();
+                        if app.focus == Focus::Tasks {
+                            app.start_creating_subtask();
+                        } else {
+                            app.start_creating_task();
+                        }
+                    }
+                    KeyCode::Char('A') => {
+                        app.start_creating_task();
                     }
                     KeyCode::Char('c') => {
                         app.toggle_current_task_completion().await?;
@@ -443,7 +547,7 @@ async fn run_app_loop(
                         app.hide_help();
                     }
                     _ => {}
-                }
+                },
             }
         }
     }
@@ -462,7 +566,10 @@ fn ui(f: &mut Frame, app: &mut App) {
         .collect();
 
     let workspace_block = if app.focus == Focus::Workspaces {
-        Block::default().title("workspaces").borders(Borders::ALL).border_style(Style::default().fg(Color::Blue))
+        Block::default()
+            .title("workspaces")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
     } else {
         Block::default().title("workspaces").borders(Borders::ALL)
     };
@@ -474,17 +581,29 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(workspaces, content_chunks[0], &mut app.workspace_state);
 
-    let task_items: Vec<ListItem> = app
-        .tasks
+    let task_items: Vec<ListItem> = app.task_displays
         .iter()
-        .map(|t| {
-            let status = if t.completed { "✓" } else { " " };
-            ListItem::new(Span::raw(format!("[{}] {}", status, t.title)))
+        .map(|td| {
+            let indent = "  ".repeat(td.level);
+            let checkbox = if td.task.completed { "×" } else { " " };
+            let text = format!("{}[{}] {}", indent, checkbox, td.task.title);
+            
+            if td.task.completed {
+                ListItem::new(Span::styled(
+                    text,
+                    Style::default().add_modifier(Modifier::CROSSED_OUT).fg(Color::DarkGray)
+                ))
+            } else {
+                ListItem::new(Span::raw(text))
+            }
         })
         .collect();
 
     let task_block = if app.focus == Focus::Tasks {
-        Block::default().title("tasks").borders(Borders::ALL).border_style(Style::default().fg(Color::Blue))
+        Block::default()
+            .title("tasks")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue))
     } else {
         Block::default().title("tasks").borders(Borders::ALL)
     };
@@ -500,7 +619,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         InputMode::Insert => {
             let popup_area = centered_rect(60, 20, f.area());
             f.render_widget(Clear, popup_area);
-            
+
             let input = Paragraph::new(app.input_buffer.as_str())
                 .block(Block::default().title("rename").borders(Borders::ALL))
                 .style(Style::default().fg(Color::Yellow));
@@ -509,21 +628,31 @@ fn ui(f: &mut Frame, app: &mut App) {
         InputMode::DeleteConfirm => {
             let popup_area = centered_rect(60, 20, f.area());
             f.render_widget(Clear, popup_area);
-            
+
             let target_name = app.delete_target.as_deref().unwrap_or("item");
             let confirm_text = format!("Delete '{}'?\n\ny: confirm | n/esc: cancel", target_name);
             let confirm = Paragraph::new(confirm_text)
-                .block(Block::default().title("confirm delete").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("confirm delete")
+                        .borders(Borders::ALL),
+                )
                 .style(Style::default().fg(Color::Red));
             f.render_widget(confirm, popup_area);
         }
         InputMode::Creating => {
             let popup_area = centered_rect(60, 20, f.area());
             f.render_widget(Clear, popup_area);
-            
+
             let title = match app.focus {
                 Focus::Workspaces => "new workspace",
-                Focus::Tasks => "new task",
+                Focus::Tasks => {
+                    if app.creating_subtask {
+                        "new subtask"
+                    } else {
+                        "new task"
+                    }
+                }
             };
             let input = Paragraph::new(app.input_buffer.as_str())
                 .block(Block::default().title(title).borders(Borders::ALL))
@@ -533,8 +662,21 @@ fn ui(f: &mut Frame, app: &mut App) {
         InputMode::Help => {
             let popup_area = centered_rect(80, 60, f.area());
             f.render_widget(Clear, popup_area);
-            
-            let help_text = "HELP\n\nNavigation:\n  h/l/tab: switch focus between workspaces and tasks\n  j/k: navigate up/down in focused panel\n\nActions:\n  a: add new workspace or task\n  r: rename selected item\n  c: complete/uncomplete task\n  D: delete selected item\n  ?: show/hide this help\n  q: quit\n\nPress ? or ESC to close";
+
+            let help_text = r#"Navigation:
+  h/l/tab: switch focus between workspaces and tasks
+  j/k: navigate up/down in focused panel
+
+Actions:
+  a: add subtask (when on tasks) or workspace
+  A: add new top-level task
+  r: rename selected item
+  c: complete/uncomplete task
+  D: delete selected item
+  ?: show/hide this help
+  q: quit
+
+Press ? or ESC to close"#;
             let help = Paragraph::new(help_text)
                 .block(Block::default().title("help").borders(Borders::ALL))
                 .style(Style::default().fg(Color::White));

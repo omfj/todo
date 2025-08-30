@@ -1,5 +1,5 @@
 build:
     cargo run --release
 
-install:
+install: build
     mv target/release/todo ~/.local/bin/todo

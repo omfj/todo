@@ -18,6 +18,7 @@ pub struct Task {
     pub description: Option<String>,
     pub completed: bool,
     pub workspace_id: i64,
+    pub parent_task_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

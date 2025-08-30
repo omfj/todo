@@ -37,7 +37,7 @@ impl Db {
 
     pub async fn get_tasks_for_workspace(&self, workspace_id: i64) -> anyhow::Result<Vec<Task>> {
         let rows = sqlx::query_as::<_, Task>(
-            "SELECT id, title, description, completed, workspace_id, created_at, updated_at
+            "SELECT id, title, description, completed, workspace_id, parent_task_id, created_at, updated_at
              FROM tasks WHERE workspace_id = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -61,6 +61,19 @@ impl Db {
             title,
             workspace_id
         )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn create_subtask(&self, title: &str, workspace_id: i64, parent_task_id: i64) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO tasks (title, workspace_id, parent_task_id) VALUES (?, ?, ?)"
+        )
+        .bind(title)
+        .bind(workspace_id)
+        .bind(parent_task_id)
         .execute(&self.pool)
         .await?;
 
