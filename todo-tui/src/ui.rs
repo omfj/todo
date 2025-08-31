@@ -1,16 +1,16 @@
 use anyhow::Result;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     crossterm::{
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame, Terminal,
 };
 use std::io;
 
@@ -20,7 +20,6 @@ use todo_core::{Database, Task, Workspace};
 pub struct TaskDisplay {
     pub task: Task,
     pub level: usize,
-    pub index: usize,
 }
 
 #[derive(PartialEq)]
@@ -138,7 +137,6 @@ impl App {
         self.task_displays.push(TaskDisplay {
             task: task.clone(),
             level,
-            index: *index,
         });
         *index += 1;
 
