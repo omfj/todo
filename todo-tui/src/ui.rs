@@ -1,27 +1,26 @@
 use anyhow::Result;
 use ratatui::{
-    Frame, Terminal,
     backend::CrosstermBackend,
     crossterm::{
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
         execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    Frame, Terminal,
 };
 use std::io;
 
-use crate::db::Db;
-use crate::models::{Task, Workspace};
+use todo_core::{Database, Task, Workspace};
 
 #[derive(Debug, Clone)]
-struct TaskDisplay {
-    task: Task,
-    level: usize,
-    index: usize,
+pub struct TaskDisplay {
+    pub task: Task,
+    pub level: usize,
+    pub index: usize,
 }
 
 #[derive(PartialEq)]
@@ -46,7 +45,7 @@ pub struct App {
     pub workspace_state: ListState,
     pub task_state: ListState,
     pub selected_workspace: Option<usize>,
-    pub db: Db,
+    pub db: Database,
     pub focus: Focus,
     pub input_mode: InputMode,
     pub input_buffer: String,
@@ -55,7 +54,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Database) -> Self {
         let mut workspace_state = ListState::default();
         workspace_state.select(Some(0));
 
@@ -448,7 +447,7 @@ impl App {
     }
 }
 
-pub async fn run_app(db: Db) -> Result<()> {
+pub async fn run_app(db: Database) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;

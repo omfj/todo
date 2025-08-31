@@ -1,12 +1,10 @@
-use crate::db::Db;
+use todo_core::Database;
 
-mod db;
-mod models;
 mod ui;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let db = Db::connect().await?;
+    let db = Database::connect().await?;
 
     ui::run_app(db).await?;
 

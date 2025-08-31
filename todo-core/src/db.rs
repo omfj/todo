@@ -1,11 +1,11 @@
 use crate::models::{Task, Workspace};
 use sqlx::sqlite::SqlitePool;
 
-pub struct Db {
+pub struct Database {
     pool: SqlitePool,
 }
 
-impl Db {
+impl Database {
     pub async fn connect() -> anyhow::Result<Self> {
         let config_dir = dirs::state_dir()
             .or_else(dirs::config_dir)
@@ -22,7 +22,7 @@ impl Db {
 
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        Ok(Db { pool })
+        Ok(Database { pool })
     }
 
     pub async fn get_workspaces(&self) -> anyhow::Result<Vec<Workspace>> {
