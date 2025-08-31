@@ -581,10 +581,15 @@ async fn run_app_loop(
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(f.area());
+
     let content_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
-        .split(f.area());
+        .split(main_chunks[0]);
 
     let workspace_items: Vec<ListItem> = app
         .workspaces
@@ -721,6 +726,10 @@ Press ? or ESC to close"#;
         }
         InputMode::Normal => {}
     }
+
+    let status_bar = Paragraph::new("q: quit | ?: help")
+        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    f.render_widget(status_bar, main_chunks[1]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
