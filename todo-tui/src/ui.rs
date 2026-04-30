@@ -513,7 +513,7 @@ async fn run_app_loop(
                     KeyCode::Char('A') => {
                         app.start_creating_task();
                     }
-                    KeyCode::Char('c') => {
+                    KeyCode::Char('c') | KeyCode::Char(' ') => {
                         app.toggle_current_task_completion().await?;
                     }
                     KeyCode::Char('r') => {
