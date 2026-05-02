@@ -663,6 +663,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(Block::default().title("rename").borders(Borders::ALL))
                 .style(Style::default().fg(Color::Yellow));
             f.render_widget(input, popup_area);
+            f.set_cursor_position((
+                popup_area.x + 1 + app.input_buffer.len() as u16,
+                popup_area.y + 1,
+            ));
         }
         InputMode::DeleteConfirm => {
             let popup_area = centered_rect(60, 20, f.area());
@@ -697,6 +701,10 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .block(Block::default().title(title).borders(Borders::ALL))
                 .style(Style::default().fg(Color::Green));
             f.render_widget(input, popup_area);
+            f.set_cursor_position((
+                popup_area.x + 1 + app.input_buffer.len() as u16,
+                popup_area.y + 1,
+            ));
         }
         InputMode::Help => {
             let popup_area = centered_rect(80, 60, f.area());
