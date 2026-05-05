@@ -3,6 +3,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     crossterm::{
+        cursor::SetCursorStyle,
         event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -12,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+use std::cmp::Reverse;
 use std::io;
 
 use todo_core::{Database, Task, Workspace};
@@ -50,6 +52,7 @@ pub struct App {
     pub input_buffer: String,
     pub delete_target: Option<String>,
     pub creating_subtask: bool,
+    pub sort_created_desc: bool,
 }
 
 impl App {
@@ -70,6 +73,7 @@ impl App {
             input_buffer: String::new(),
             delete_target: None,
             creating_subtask: false,
+            sort_created_desc: true,
         }
     }
 
@@ -107,14 +111,14 @@ impl App {
             .filter(|t| !t.completed && t.parent_task_id.is_none())
             .cloned()
             .collect();
-        incomplete_root_tasks.sort_by_key(|t| t.created_at);
+        self.sort_tasks_by_created_at(&mut incomplete_root_tasks);
 
         let mut completed_root_tasks: Vec<Task> = tasks
             .iter()
             .filter(|t| t.completed && t.parent_task_id.is_none())
             .cloned()
             .collect();
-        completed_root_tasks.sort_by_key(|t| t.created_at);
+        self.sort_tasks_by_created_at(&mut completed_root_tasks);
 
         let mut index = 0;
 
@@ -145,7 +149,7 @@ impl App {
             .filter(|t| t.parent_task_id == Some(task.id))
             .cloned()
             .collect();
-        children.sort_by_key(|t| t.created_at);
+        self.sort_tasks_by_created_at(&mut children);
 
         let incomplete_children: Vec<Task> =
             children.iter().filter(|t| !t.completed).cloned().collect();
@@ -158,6 +162,34 @@ impl App {
 
         for child in completed_children {
             self.add_task_and_children(all_tasks, &child, level + 1, index);
+        }
+    }
+
+    fn sort_tasks_by_created_at(&self, tasks: &mut [Task]) {
+        if self.sort_created_desc {
+            tasks.sort_by_key(|t| Reverse(t.created_at));
+        } else {
+            tasks.sort_by_key(|t| t.created_at);
+        }
+    }
+
+    pub fn toggle_sort_order(&mut self) {
+        let selected_task_id = self
+            .task_state
+            .selected()
+            .and_then(|idx| self.task_displays.get(idx))
+            .map(|td| td.task.id);
+
+        self.sort_created_desc = !self.sort_created_desc;
+        self.build_task_hierarchy();
+
+        if let Some(task_id) = selected_task_id {
+            let new_selection = self
+                .task_displays
+                .iter()
+                .position(|td| td.task.id == task_id)
+                .or_else(|| (!self.task_displays.is_empty()).then_some(0));
+            self.task_state.select(new_selection);
         }
     }
 
@@ -479,6 +511,15 @@ async fn run_app_loop(
     loop {
         terminal.draw(|f| ui(f, app))?;
 
+        match app.input_mode {
+            InputMode::Insert | InputMode::Creating => {
+                execute!(io::stdout(), SetCursorStyle::BlinkingBar)?;
+            }
+            _ => {
+                execute!(io::stdout(), SetCursorStyle::DefaultUserShape)?;
+            }
+        }
+
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
@@ -503,14 +544,14 @@ async fn run_app_loop(
                             Focus::Tasks => Focus::Workspaces,
                         };
                     }
-                    KeyCode::Char('a') => {
+                    KeyCode::Char('A') => {
                         if app.focus == Focus::Tasks {
                             app.start_creating_subtask();
                         } else {
                             app.start_creating_task();
                         }
                     }
-                    KeyCode::Char('A') => {
+                    KeyCode::Char('a') => {
                         app.start_creating_task();
                     }
                     KeyCode::Char('c') | KeyCode::Char(' ') => {
@@ -518,6 +559,9 @@ async fn run_app_loop(
                     }
                     KeyCode::Char('r') => {
                         app.start_rename();
+                    }
+                    KeyCode::Char('s') => {
+                        app.toggle_sort_order();
                     }
                     KeyCode::Char('D') => {
                         app.start_delete_confirm();
@@ -558,7 +602,7 @@ async fn run_app_loop(
                     _ => {}
                 },
                 InputMode::DeleteConfirm => match key.code {
-                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                         app.confirm_delete().await?;
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -638,13 +682,19 @@ fn ui(f: &mut Frame, app: &mut App) {
         })
         .collect();
 
+    let sort_label = if app.sort_created_desc {
+        "newest first"
+    } else {
+        "oldest first"
+    };
+    let task_title = format!("tasks ({sort_label})");
     let task_block = if app.focus == Focus::Tasks {
         Block::default()
-            .title("tasks")
+            .title(task_title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Blue))
     } else {
-        Block::default().title("tasks").borders(Borders::ALL)
+        Block::default().title(task_title).borders(Borders::ALL)
     };
     let tasks = List::new(task_items)
         .block(task_block)
@@ -673,7 +723,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             f.render_widget(Clear, popup_area);
 
             let target_name = app.delete_target.as_deref().unwrap_or("item");
-            let confirm_text = format!("Delete '{target_name}'?\n\ny: confirm | n/esc: cancel");
+            let confirm_text =
+                format!("Delete '{target_name}'?\n\nenter/y: confirm | n/esc: cancel");
             let confirm = Paragraph::new(confirm_text)
                 .block(
                     Block::default()
@@ -715,9 +766,10 @@ fn ui(f: &mut Frame, app: &mut App) {
   j/k: navigate up/down in focused panel
 
 Actions:
-  a: add subtask (when on tasks) or workspace
-  A: add new top-level task
+  A: add subtask (when on tasks) or workspace
+  a: add new top-level task
   r: rename selected item
+  s: reverse creation-date sort
   c: complete/uncomplete task
   D: delete selected item
   ?: show/hide this help
@@ -732,8 +784,11 @@ Press ? or ESC to close"#;
         InputMode::Normal => {}
     }
 
-    let status_bar = Paragraph::new("q: quit | ?: help")
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    let status_bar = Paragraph::new("q: quit | ?: help").style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(status_bar, main_chunks[1]);
 }
 
