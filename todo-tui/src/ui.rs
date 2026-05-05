@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{Local, NaiveDate};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -39,6 +40,13 @@ pub enum InputMode {
     Help,
     Creating,
     Search,
+    DueDate,
+}
+
+#[derive(PartialEq)]
+pub enum EditField {
+    Title,
+    DueDate,
 }
 
 pub struct App {
@@ -53,6 +61,9 @@ pub struct App {
     pub focus: Focus,
     pub input_mode: InputMode,
     pub input_buffer: String,
+    pub edit_title_buffer: String,
+    pub edit_due_date_buffer: String,
+    pub edit_field: EditField,
     pub search_query: String,
     pub delete_target: Option<String>,
     pub creating_subtask: bool,
@@ -76,6 +87,9 @@ impl App {
             focus: Focus::Workspaces,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            edit_title_buffer: String::new(),
+            edit_due_date_buffer: String::new(),
+            edit_field: EditField::Title,
             search_query: String::new(),
             delete_target: None,
             creating_subtask: false,
@@ -426,30 +440,62 @@ impl App {
     }
 
     pub fn start_rename(&mut self) {
-        let current_name = match self.focus {
+        match self.focus {
             Focus::Workspaces => {
-                if let Some(selected) = self.workspace_state.selected() {
-                    self.workspaces
-                        .get(selected)
-                        .map(|w| w.name.clone())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                }
+                let current_name = self
+                    .workspace_state
+                    .selected()
+                    .and_then(|selected| self.workspaces.get(selected))
+                    .map(|w| w.name.clone())
+                    .unwrap_or_default();
+                self.input_buffer = current_name;
             }
             Focus::Tasks => {
-                if let Some(selected) = self.task_state.selected() {
-                    self.task_displays
-                        .get(selected)
-                        .map(|td| td.task.title.clone())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                }
+                let Some(selected) = self.task_state.selected() else {
+                    return;
+                };
+                let Some(task_display) = self.task_displays.get(selected) else {
+                    return;
+                };
+                self.edit_title_buffer = task_display.task.title.clone();
+                self.edit_due_date_buffer = task_display.task.due_date.clone().unwrap_or_default();
+                self.edit_field = EditField::Title;
             }
-        };
-        self.input_buffer = current_name;
+        }
         self.input_mode = InputMode::Insert;
+    }
+
+    pub fn toggle_edit_field(&mut self) {
+        self.edit_field = match self.edit_field {
+            EditField::Title => EditField::DueDate,
+            EditField::DueDate => EditField::Title,
+        };
+    }
+
+    pub fn edit_active_field_push(&mut self, c: char) {
+        match self.focus {
+            Focus::Workspaces => self.input_buffer.push(c),
+            Focus::Tasks => match self.edit_field {
+                EditField::Title => self.edit_title_buffer.push(c),
+                EditField::DueDate => self.edit_due_date_buffer.push(c),
+            },
+        }
+    }
+
+    pub fn edit_active_field_pop(&mut self) {
+        match self.focus {
+            Focus::Workspaces => {
+                self.input_buffer.pop();
+            }
+            Focus::Tasks => match self.edit_field {
+                EditField::Title => {
+                    self.edit_title_buffer.pop();
+                }
+                EditField::DueDate => {
+                    self.edit_due_date_buffer.pop();
+                }
+            },
+        }
     }
 
     pub async fn finish_rename(&mut self) -> Result<()> {
@@ -467,8 +513,24 @@ impl App {
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
                     if let Some(task_display) = self.task_displays.get(selected) {
+                        let due_date = self.edit_due_date_buffer.trim();
+                        let normalized_due_date = if due_date.is_empty() {
+                            None
+                        } else {
+                            let Ok(date) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") else {
+                                return Ok(());
+                            };
+                            Some(date.format("%Y-%m-%d").to_string())
+                        };
+
                         self.db
-                            .update_task_name(task_display.task.id, &self.input_buffer)
+                            .update_task_name(task_display.task.id, &self.edit_title_buffer)
+                            .await?;
+                        self.db
+                            .update_task_due_date(
+                                task_display.task.id,
+                                normalized_due_date.as_deref(),
+                            )
                             .await?;
                         self.load_tasks_for_selected_workspace().await?;
                     }
@@ -477,10 +539,65 @@ impl App {
         }
         self.input_mode = InputMode::Normal;
         self.input_buffer.clear();
+        self.edit_title_buffer.clear();
+        self.edit_due_date_buffer.clear();
         Ok(())
     }
 
     pub fn cancel_rename(&mut self) {
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.edit_title_buffer.clear();
+        self.edit_due_date_buffer.clear();
+    }
+
+    pub fn start_due_date_edit(&mut self) {
+        if self.focus != Focus::Tasks {
+            return;
+        }
+
+        let due_date = self
+            .task_state
+            .selected()
+            .and_then(|selected| self.task_displays.get(selected))
+            .and_then(|td| td.task.due_date.clone())
+            .unwrap_or_default();
+
+        self.input_buffer = due_date;
+        self.input_mode = InputMode::DueDate;
+    }
+
+    pub async fn finish_due_date_edit(&mut self) -> Result<()> {
+        let Some(selected) = self.task_state.selected() else {
+            self.cancel_due_date_edit();
+            return Ok(());
+        };
+        let Some(task_display) = self.task_displays.get(selected) else {
+            self.cancel_due_date_edit();
+            return Ok(());
+        };
+
+        let due_date = self.input_buffer.trim();
+        let normalized_due_date = if due_date.is_empty() {
+            None
+        } else {
+            let Ok(date) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") else {
+                return Ok(());
+            };
+            Some(date.format("%Y-%m-%d").to_string())
+        };
+
+        self.db
+            .update_task_due_date(task_display.task.id, normalized_due_date.as_deref())
+            .await?;
+        let current_selection = self.task_state.selected();
+        self.load_tasks_for_selected_workspace().await?;
+        self.task_state.select(current_selection);
+        self.cancel_due_date_edit();
+        Ok(())
+    }
+
+    pub fn cancel_due_date_edit(&mut self) {
         self.input_mode = InputMode::Normal;
         self.input_buffer.clear();
     }
@@ -602,7 +719,7 @@ async fn run_app_loop(
         terminal.draw(|f| ui(f, app))?;
 
         match app.input_mode {
-            InputMode::Insert | InputMode::Creating | InputMode::Search => {
+            InputMode::Insert | InputMode::Creating | InputMode::Search | InputMode::DueDate => {
                 execute!(io::stdout(), SetCursorStyle::BlinkingBar)?;
             }
             _ => {
@@ -652,7 +769,10 @@ async fn run_app_loop(
                     KeyCode::Char('c') | KeyCode::Char(' ') => {
                         app.toggle_current_task_completion().await?;
                     }
-                    KeyCode::Char('r') => {
+                    KeyCode::Char('d') => {
+                        app.start_due_date_edit();
+                    }
+                    KeyCode::Char('e') => {
                         app.start_rename();
                     }
                     KeyCode::Char('/') => {
@@ -679,11 +799,16 @@ async fn run_app_loop(
                     KeyCode::Esc => {
                         app.cancel_rename();
                     }
+                    KeyCode::Tab => {
+                        if app.focus == Focus::Tasks {
+                            app.toggle_edit_field();
+                        }
+                    }
                     KeyCode::Backspace => {
-                        app.input_buffer.pop();
+                        app.edit_active_field_pop();
                     }
                     KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
+                        app.edit_active_field_push(c);
                     }
                     _ => {}
                 },
@@ -693,6 +818,21 @@ async fn run_app_loop(
                     }
                     KeyCode::Esc => {
                         app.cancel_creating();
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    _ => {}
+                },
+                InputMode::DueDate => match key.code {
+                    KeyCode::Enter => {
+                        app.finish_due_date_edit().await?;
+                    }
+                    KeyCode::Esc => {
+                        app.cancel_due_date_edit();
                     }
                     KeyCode::Backspace => {
                         app.input_buffer.pop();
@@ -795,9 +935,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             let task_span = Span::raw(format!("{}[{}] {}", indent, checkbox, td.task.title));
             let date_span =
                 Span::styled(format!(" ({date})"), Style::default().fg(Color::DarkGray));
+            let today = Local::now().date_naive();
+            let due_date_span = td.task.due_date.as_ref().map(|due_date| {
+                let due_date_color = match NaiveDate::parse_from_str(due_date, "%Y-%m-%d") {
+                    Ok(parsed_due_date) if today > parsed_due_date => Color::Red,
+                    _ => Color::Yellow,
+                };
+                Span::styled(
+                    format!(" due {due_date}"),
+                    Style::default().fg(due_date_color),
+                )
+            });
 
             if td.task.completed {
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(
                         format!("{}[{}] {}", indent, checkbox, td.task.title),
                         Style::default()
@@ -805,9 +956,17 @@ fn ui(f: &mut Frame, app: &mut App) {
                             .fg(Color::DarkGray),
                     ),
                     date_span,
-                ]))
+                ];
+                if let Some(due_date_span) = due_date_span {
+                    spans.push(due_date_span);
+                }
+                ListItem::new(Line::from(spans))
             } else {
-                ListItem::new(Line::from(vec![task_span, date_span]))
+                let mut spans = vec![task_span, date_span];
+                if let Some(due_date_span) = due_date_span {
+                    spans.push(due_date_span);
+                }
+                ListItem::new(Line::from(spans))
             }
         })
         .collect();
@@ -843,14 +1002,72 @@ fn ui(f: &mut Frame, app: &mut App) {
             let popup_area = centered_rect(60, 20, f.area());
             f.render_widget(Clear, popup_area);
 
-            let input = Paragraph::new(app.input_buffer.as_str())
-                .block(Block::default().title("rename").borders(Borders::ALL))
-                .style(Style::default().fg(Color::Yellow));
-            f.render_widget(input, popup_area);
-            f.set_cursor_position((
-                popup_area.x + 1 + app.input_buffer.len() as u16,
-                popup_area.y + 1,
-            ));
+            match app.focus {
+                Focus::Workspaces => {
+                    let input = Paragraph::new(app.input_buffer.as_str())
+                        .block(
+                            Block::default()
+                                .title("edit workspace")
+                                .borders(Borders::ALL),
+                        )
+                        .style(Style::default().fg(Color::Yellow));
+                    f.render_widget(input, popup_area);
+                    f.set_cursor_position((
+                        popup_area.x + 1 + app.input_buffer.len() as u16,
+                        popup_area.y + 1,
+                    ));
+                }
+                Focus::Tasks => {
+                    let title_marker = if app.edit_field == EditField::Title {
+                        "> "
+                    } else {
+                        "  "
+                    };
+                    let due_date_marker = if app.edit_field == EditField::DueDate {
+                        "> "
+                    } else {
+                        "  "
+                    };
+                    let due_date_line = if app.edit_due_date_buffer.is_empty() {
+                        Line::from(vec![
+                            Span::raw(format!("{due_date_marker}due: ")),
+                            Span::styled("YYYY-MM-DD", Style::default().fg(Color::DarkGray)),
+                        ])
+                    } else {
+                        Line::from(format!(
+                            "{due_date_marker}due: {}",
+                            app.edit_due_date_buffer
+                        ))
+                    };
+                    let input = Paragraph::new(vec![
+                        Line::from(format!("{title_marker}title: {}", app.edit_title_buffer)),
+                        due_date_line,
+                    ])
+                    .block(Block::default().title("edit task").borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Yellow));
+                    f.render_widget(input, popup_area);
+
+                    let (cursor_y, cursor_x) = match app.edit_field {
+                        EditField::Title => (
+                            popup_area.y + 1,
+                            popup_area.x
+                                + 1
+                                + title_marker.len() as u16
+                                + 7
+                                + app.edit_title_buffer.len() as u16,
+                        ),
+                        EditField::DueDate => (
+                            popup_area.y + 2,
+                            popup_area.x
+                                + 1
+                                + due_date_marker.len() as u16
+                                + 5
+                                + app.edit_due_date_buffer.len() as u16,
+                        ),
+                    };
+                    f.set_cursor_position((cursor_x, cursor_y));
+                }
+            }
         }
         InputMode::DeleteConfirm => {
             let popup_area = centered_rect(60, 20, f.area());
@@ -891,6 +1108,31 @@ fn ui(f: &mut Frame, app: &mut App) {
                 popup_area.y + 1,
             ));
         }
+        InputMode::DueDate => {
+            let popup_area = centered_rect(60, 20, f.area());
+            f.render_widget(Clear, popup_area);
+
+            let input_line = if app.input_buffer.is_empty() {
+                Line::from(Span::styled(
+                    "YYYY-MM-DD",
+                    Style::default().fg(Color::DarkGray),
+                ))
+            } else {
+                Line::from(app.input_buffer.as_str())
+            };
+            let input = Paragraph::new(input_line)
+                .block(
+                    Block::default()
+                        .title("due date YYYY-MM-DD")
+                        .borders(Borders::ALL),
+                )
+                .style(Style::default().fg(Color::Yellow));
+            f.render_widget(input, popup_area);
+            f.set_cursor_position((
+                popup_area.x + 1 + app.input_buffer.len() as u16,
+                popup_area.y + 1,
+            ));
+        }
         InputMode::Help => {
             let popup_area = centered_rect(80, 60, f.area());
             f.render_widget(Clear, popup_area);
@@ -903,7 +1145,9 @@ Actions:
   A: add subtask (when on tasks) or workspace
   a: add new top-level task
   /: search tasks
-  r: rename selected item
+  d: set/clear due date
+  e: edit selected item
+  tab: switch edit fields
   s: reverse creation-date sort
   x: archive completed tasks
   c: complete/uncomplete task

@@ -52,7 +52,7 @@ impl Database {
 
     pub async fn get_tasks_for_workspace(&self, workspace_id: i64) -> anyhow::Result<Vec<Task>> {
         let rows = sqlx::query_as::<_, Task>(
-            "SELECT id, title, description, completed, archived, workspace_id, parent_task_id, created_at, updated_at
+            "SELECT id, title, description, completed, archived, due_date, workspace_id, parent_task_id, created_at, updated_at
              FROM tasks WHERE workspace_id = ? AND archived = 0 ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -133,6 +133,20 @@ impl Database {
 
     pub async fn update_task_name(&self, task_id: i64, title: &str) -> anyhow::Result<()> {
         sqlx::query!("UPDATE tasks SET title = ? WHERE id = ?", title, task_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn update_task_due_date(
+        &self,
+        task_id: i64,
+        due_date: Option<&str>,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE tasks SET due_date = ? WHERE id = ?")
+            .bind(due_date)
+            .bind(task_id)
             .execute(&self.pool)
             .await?;
 
