@@ -12,6 +12,13 @@ pub struct Workspace {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct WorkspaceStats {
+    pub workspace_id: i64,
+    pub completed: i64,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct Task {
     pub id: i64,
     pub title: String,

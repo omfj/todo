@@ -14,10 +14,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
-use todo_core::{Database, Task, Workspace};
+use todo_core::{Database, Task, Workspace, WorkspaceStats};
 
 #[derive(Debug, Clone)]
 pub struct TaskDisplay {
@@ -42,6 +42,7 @@ pub enum InputMode {
 
 pub struct App {
     pub workspaces: Vec<Workspace>,
+    pub workspace_stats: HashMap<i64, WorkspaceStats>,
     pub tasks: Vec<Task>,
     pub task_displays: Vec<TaskDisplay>,
     pub workspace_state: ListState,
@@ -63,6 +64,7 @@ impl App {
 
         Self {
             workspaces: vec![],
+            workspace_stats: HashMap::new(),
             tasks: vec![],
             task_displays: vec![],
             workspace_state,
@@ -80,6 +82,7 @@ impl App {
 
     pub async fn load_workspaces(&mut self) -> Result<()> {
         self.workspaces = self.db.get_workspaces().await?;
+        self.refresh_workspace_stats().await?;
         if !self.workspaces.is_empty() {
             self.workspace_state.select(Some(0));
             self.selected_workspace = Some(0);
@@ -92,6 +95,7 @@ impl App {
         if let Some(selected) = self.selected_workspace {
             if let Some(workspace) = self.workspaces.get(selected) {
                 self.tasks = self.db.get_tasks_for_workspace(workspace.id).await?;
+                self.refresh_workspace_stats().await?;
                 self.build_task_hierarchy();
                 self.task_state.select(if self.task_displays.is_empty() {
                     None
@@ -100,6 +104,17 @@ impl App {
                 });
             }
         }
+        Ok(())
+    }
+
+    async fn refresh_workspace_stats(&mut self) -> Result<()> {
+        self.workspace_stats = self
+            .db
+            .get_workspace_stats()
+            .await?
+            .into_iter()
+            .map(|stats| (stats.workspace_id, stats))
+            .collect();
         Ok(())
     }
 
@@ -658,7 +673,19 @@ fn ui(f: &mut Frame, app: &mut App) {
     let workspace_items: Vec<ListItem> = app
         .workspaces
         .iter()
-        .map(|w| ListItem::new(Span::raw(&w.name)))
+        .map(|w| {
+            let stats = app.workspace_stats.get(&w.id);
+            let completed = stats.map_or(0, |s| s.completed);
+            let total = stats.map_or(0, |s| s.total);
+
+            ListItem::new(Line::from(vec![
+                Span::raw(&w.name),
+                Span::styled(
+                    format!(" ({completed}/{total})"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
         .collect();
 
     let workspace_block = if app.focus == Focus::Workspaces {

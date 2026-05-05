@@ -1,4 +1,4 @@
-use crate::models::{Task, Workspace};
+use crate::models::{Task, Workspace, WorkspaceStats};
 use sqlx::sqlite::SqlitePool;
 
 pub struct Database {
@@ -28,6 +28,21 @@ impl Database {
     pub async fn get_workspaces(&self) -> anyhow::Result<Vec<Workspace>> {
         let rows = sqlx::query_as::<_, Workspace>(
             "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows)
+    }
+
+    pub async fn get_workspace_stats(&self) -> anyhow::Result<Vec<WorkspaceStats>> {
+        let rows = sqlx::query_as::<_, WorkspaceStats>(
+            "SELECT w.id AS workspace_id,
+                    COALESCE(SUM(CASE WHEN t.completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
+                    COUNT(t.id) AS total
+             FROM workspaces w
+             LEFT JOIN tasks t ON t.workspace_id = w.id AND t.archived = 0
+             GROUP BY w.id",
         )
         .fetch_all(&self.pool)
         .await?;
