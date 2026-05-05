@@ -38,6 +38,7 @@ pub enum InputMode {
     DeleteConfirm,
     Help,
     Creating,
+    Search,
 }
 
 pub struct App {
@@ -52,6 +53,7 @@ pub struct App {
     pub focus: Focus,
     pub input_mode: InputMode,
     pub input_buffer: String,
+    pub search_query: String,
     pub delete_target: Option<String>,
     pub creating_subtask: bool,
     pub sort_created_desc: bool,
@@ -74,6 +76,7 @@ impl App {
             focus: Focus::Workspaces,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            search_query: String::new(),
             delete_target: None,
             creating_subtask: false,
             sort_created_desc: true,
@@ -120,7 +123,13 @@ impl App {
 
     fn build_task_hierarchy(&mut self) {
         self.task_displays.clear();
-        let tasks = self.tasks.clone();
+        let search_query = self.search_query.trim().to_lowercase();
+        let tasks: Vec<Task> = self
+            .tasks
+            .iter()
+            .filter(|task| search_query.is_empty() || fuzzy_matches(&task.title, &search_query))
+            .cloned()
+            .collect();
         let active_task_ids: HashSet<i64> = tasks.iter().map(|t| t.id).collect();
 
         let mut incomplete_root_tasks: Vec<Task> = tasks
@@ -218,6 +227,42 @@ impl App {
         }
     }
 
+    fn select_first_visible_task(&mut self) {
+        self.task_state.select(if self.task_displays.is_empty() {
+            None
+        } else {
+            Some(0)
+        });
+    }
+
+    pub fn start_search(&mut self) {
+        self.input_buffer = self.search_query.clone();
+        self.input_mode = InputMode::Search;
+        self.focus = Focus::Tasks;
+    }
+
+    pub fn update_search(&mut self) {
+        self.search_query = self.input_buffer.clone();
+        self.build_task_hierarchy();
+        self.select_first_visible_task();
+    }
+
+    pub fn finish_search(&mut self) {
+        self.search_query = self.input_buffer.clone();
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.build_task_hierarchy();
+        self.select_first_visible_task();
+    }
+
+    pub fn cancel_search(&mut self) {
+        self.search_query.clear();
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.build_task_hierarchy();
+        self.select_first_visible_task();
+    }
+
     pub async fn next_workspace(&mut self) -> Result<()> {
         let i = match self.workspace_state.selected() {
             Some(i) => {
@@ -253,6 +298,11 @@ impl App {
     }
 
     pub fn next_task(&mut self) {
+        if self.task_displays.is_empty() {
+            self.task_state.select(None);
+            return;
+        }
+
         let i = match self.task_state.selected() {
             Some(i) => {
                 if i >= self.task_displays.len() - 1 {
@@ -267,6 +317,11 @@ impl App {
     }
 
     pub fn previous_task(&mut self) {
+        if self.task_displays.is_empty() {
+            self.task_state.select(None);
+            return;
+        }
+
         let i = match self.task_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -547,7 +602,7 @@ async fn run_app_loop(
         terminal.draw(|f| ui(f, app))?;
 
         match app.input_mode {
-            InputMode::Insert | InputMode::Creating => {
+            InputMode::Insert | InputMode::Creating | InputMode::Search => {
                 execute!(io::stdout(), SetCursorStyle::BlinkingBar)?;
             }
             _ => {
@@ -579,6 +634,11 @@ async fn run_app_loop(
                             Focus::Tasks => Focus::Workspaces,
                         };
                     }
+                    KeyCode::Esc => {
+                        if !app.search_query.is_empty() {
+                            app.cancel_search();
+                        }
+                    }
                     KeyCode::Char('A') => {
                         if app.focus == Focus::Tasks {
                             app.start_creating_subtask();
@@ -594,6 +654,9 @@ async fn run_app_loop(
                     }
                     KeyCode::Char('r') => {
                         app.start_rename();
+                    }
+                    KeyCode::Char('/') => {
+                        app.start_search();
                     }
                     KeyCode::Char('s') => {
                         app.toggle_sort_order();
@@ -636,6 +699,23 @@ async fn run_app_loop(
                     }
                     KeyCode::Char(c) => {
                         app.input_buffer.push(c);
+                    }
+                    _ => {}
+                },
+                InputMode::Search => match key.code {
+                    KeyCode::Enter => {
+                        app.finish_search();
+                    }
+                    KeyCode::Esc => {
+                        app.cancel_search();
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                        app.update_search();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                        app.update_search();
                     }
                     _ => {}
                 },
@@ -737,7 +817,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         "oldest first"
     };
-    let task_title = format!("tasks ({sort_label})");
+    let task_title = if app.search_query.trim().is_empty() {
+        format!("tasks ({sort_label})")
+    } else {
+        format!("tasks ({sort_label}, search)")
+    };
     let task_block = if app.focus == Focus::Tasks {
         Block::default()
             .title(task_title)
@@ -818,6 +902,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 Actions:
   A: add subtask (when on tasks) or workspace
   a: add new top-level task
+  /: search tasks
   r: rename selected item
   s: reverse creation-date sort
   x: archive completed tasks
@@ -832,15 +917,47 @@ Press ? or ESC to close"#;
                 .style(Style::default().fg(Color::White));
             f.render_widget(help, popup_area);
         }
+        InputMode::Search => {}
         InputMode::Normal => {}
     }
 
-    let status_bar = Paragraph::new("q: quit | ?: help").style(
+    let status_text = if app.input_mode == InputMode::Search {
+        format!("/{}", app.input_buffer)
+    } else if app.search_query.trim().is_empty() {
+        "q: quit | ?: help".to_string()
+    } else {
+        format!("search: {} | /: edit | esc: clear", app.search_query)
+    };
+    let status_bar = Paragraph::new(status_text).style(
         Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(status_bar, main_chunks[1]);
+    if app.input_mode == InputMode::Search {
+        f.set_cursor_position((
+            main_chunks[1].x + 1 + app.input_buffer.len() as u16,
+            main_chunks[1].y,
+        ));
+    }
+}
+
+fn fuzzy_matches(text: &str, query: &str) -> bool {
+    let mut query_chars = query.chars();
+    let Some(mut query_char) = query_chars.next() else {
+        return true;
+    };
+
+    for text_char in text.chars().flat_map(char::to_lowercase) {
+        if text_char == query_char {
+            match query_chars.next() {
+                Some(next_query_char) => query_char = next_query_char,
+                None => return true,
+            }
+        }
+    }
+
+    false
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
