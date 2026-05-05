@@ -37,8 +37,8 @@ impl Database {
 
     pub async fn get_tasks_for_workspace(&self, workspace_id: i64) -> anyhow::Result<Vec<Task>> {
         let rows = sqlx::query_as::<_, Task>(
-            "SELECT id, title, description, completed, workspace_id, parent_task_id, created_at, updated_at
-             FROM tasks WHERE workspace_id = ? ORDER BY created_at",
+            "SELECT id, title, description, completed, archived, workspace_id, parent_task_id, created_at, updated_at
+             FROM tasks WHERE workspace_id = ? AND archived = 0 ORDER BY created_at",
         )
         .bind(workspace_id)
         .fetch_all(&self.pool)
@@ -91,6 +91,15 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn archive_completed_tasks(&self, workspace_id: i64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE tasks SET archived = 1 WHERE workspace_id = ? AND completed = 1")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

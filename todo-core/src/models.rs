@@ -17,6 +17,7 @@ pub struct Task {
     pub title: String,
     pub description: Option<String>,
     pub completed: bool,
+    pub archived: bool,
     pub workspace_id: i64,
     pub parent_task_id: Option<i64>,
     pub created_at: DateTime<Utc>,

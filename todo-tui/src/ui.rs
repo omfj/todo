@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::io;
 
 use todo_core::{Database, Task, Workspace};
@@ -105,17 +106,26 @@ impl App {
     fn build_task_hierarchy(&mut self) {
         self.task_displays.clear();
         let tasks = self.tasks.clone();
+        let active_task_ids: HashSet<i64> = tasks.iter().map(|t| t.id).collect();
 
         let mut incomplete_root_tasks: Vec<Task> = tasks
             .iter()
-            .filter(|t| !t.completed && t.parent_task_id.is_none())
+            .filter(|t| {
+                !t.completed
+                    && t.parent_task_id
+                        .is_none_or(|parent_id| !active_task_ids.contains(&parent_id))
+            })
             .cloned()
             .collect();
         self.sort_tasks_by_created_at(&mut incomplete_root_tasks);
 
         let mut completed_root_tasks: Vec<Task> = tasks
             .iter()
-            .filter(|t| t.completed && t.parent_task_id.is_none())
+            .filter(|t| {
+                t.completed
+                    && t.parent_task_id
+                        .is_none_or(|parent_id| !active_task_ids.contains(&parent_id))
+            })
             .cloned()
             .collect();
         self.sort_tasks_by_created_at(&mut completed_root_tasks);
@@ -330,6 +340,16 @@ impl App {
                     self.load_tasks_for_selected_workspace().await?;
                     self.task_state.select(current_selection);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn archive_completed_tasks(&mut self) -> Result<()> {
+        if let Some(selected) = self.selected_workspace {
+            if let Some(workspace) = self.workspaces.get(selected) {
+                self.db.archive_completed_tasks(workspace.id).await?;
+                self.load_tasks_for_selected_workspace().await?;
             }
         }
         Ok(())
@@ -563,6 +583,9 @@ async fn run_app_loop(
                     KeyCode::Char('s') => {
                         app.toggle_sort_order();
                     }
+                    KeyCode::Char('x') => {
+                        app.archive_completed_tasks().await?;
+                    }
                     KeyCode::Char('D') => {
                         app.start_delete_confirm();
                     }
@@ -770,6 +793,7 @@ Actions:
   a: add new top-level task
   r: rename selected item
   s: reverse creation-date sort
+  x: archive completed tasks
   c: complete/uncomplete task
   D: delete selected item
   ?: show/hide this help
