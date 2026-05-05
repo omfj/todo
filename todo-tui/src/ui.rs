@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use todo_core::{Database, Task, Workspace, WorkspaceStats};
+use tui_input::{Input, backend::crossterm::EventHandler};
 
 #[derive(Debug, Clone)]
 pub struct TaskDisplay {
@@ -40,7 +41,6 @@ pub enum InputMode {
     Help,
     Creating,
     Search,
-    DueDate,
 }
 
 #[derive(PartialEq)]
@@ -60,9 +60,9 @@ pub struct App {
     pub db: Database,
     pub focus: Focus,
     pub input_mode: InputMode,
-    pub input_buffer: String,
-    pub edit_title_buffer: String,
-    pub edit_due_date_buffer: String,
+    pub input_buffer: Input,
+    pub edit_title_buffer: Input,
+    pub edit_due_date_buffer: Input,
     pub edit_field: EditField,
     pub search_query: String,
     pub delete_target: Option<String>,
@@ -86,9 +86,9 @@ impl App {
             db,
             focus: Focus::Workspaces,
             input_mode: InputMode::Normal,
-            input_buffer: String::new(),
-            edit_title_buffer: String::new(),
-            edit_due_date_buffer: String::new(),
+            input_buffer: Input::default(),
+            edit_title_buffer: Input::default(),
+            edit_due_date_buffer: Input::default(),
             edit_field: EditField::Title,
             search_query: String::new(),
             delete_target: None,
@@ -250,21 +250,21 @@ impl App {
     }
 
     pub fn start_search(&mut self) {
-        self.input_buffer = self.search_query.clone();
+        self.input_buffer = self.search_query.clone().into();
         self.input_mode = InputMode::Search;
         self.focus = Focus::Tasks;
     }
 
     pub fn update_search(&mut self) {
-        self.search_query = self.input_buffer.clone();
+        self.search_query = self.input_buffer.value().to_string();
         self.build_task_hierarchy();
         self.select_first_visible_task();
     }
 
     pub fn finish_search(&mut self) {
-        self.search_query = self.input_buffer.clone();
+        self.search_query = self.input_buffer.value().to_string();
         self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
+        self.input_buffer.reset();
         self.build_task_hierarchy();
         self.select_first_visible_task();
     }
@@ -272,7 +272,7 @@ impl App {
     pub fn cancel_search(&mut self) {
         self.search_query.clear();
         self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
+        self.input_buffer.reset();
         self.build_task_hierarchy();
         self.select_first_visible_task();
     }
@@ -350,26 +350,26 @@ impl App {
     }
 
     pub fn start_creating_subtask(&mut self) {
-        self.input_buffer.clear();
+        self.input_buffer.reset();
         self.creating_subtask = true;
         self.input_mode = InputMode::Creating;
     }
 
     pub fn start_creating_task(&mut self) {
-        self.input_buffer.clear();
+        self.input_buffer.reset();
         self.creating_subtask = false;
         self.input_mode = InputMode::Creating;
     }
 
     pub async fn finish_creating(&mut self) -> Result<()> {
-        if self.input_buffer.trim().is_empty() {
+        if self.input_buffer.value().trim().is_empty() {
             self.cancel_creating();
             return Ok(());
         }
 
         match self.focus {
             Focus::Workspaces => {
-                self.db.create_workspace(&self.input_buffer).await?;
+                self.db.create_workspace(self.input_buffer.value()).await?;
                 self.load_workspaces().await?;
             }
             Focus::Tasks => {
@@ -381,24 +381,24 @@ impl App {
                                 {
                                     self.db
                                         .create_subtask(
-                                            &self.input_buffer,
+                                            self.input_buffer.value(),
                                             workspace.id,
                                             task_display.task.id,
                                         )
                                         .await?;
                                 } else {
                                     self.db
-                                        .create_task(&self.input_buffer, workspace.id)
+                                        .create_task(self.input_buffer.value(), workspace.id)
                                         .await?;
                                 }
                             } else {
                                 self.db
-                                    .create_task(&self.input_buffer, workspace.id)
+                                    .create_task(self.input_buffer.value(), workspace.id)
                                     .await?;
                             }
                         } else {
                             self.db
-                                .create_task(&self.input_buffer, workspace.id)
+                                .create_task(self.input_buffer.value(), workspace.id)
                                 .await?;
                         }
                         self.load_tasks_for_selected_workspace().await?;
@@ -412,7 +412,7 @@ impl App {
 
     pub fn cancel_creating(&mut self) {
         self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
+        self.input_buffer.reset();
     }
 
     pub async fn toggle_current_task_completion(&mut self) -> Result<()> {
@@ -448,7 +448,7 @@ impl App {
                     .and_then(|selected| self.workspaces.get(selected))
                     .map(|w| w.name.clone())
                     .unwrap_or_default();
-                self.input_buffer = current_name;
+                self.input_buffer = current_name.into();
             }
             Focus::Tasks => {
                 let Some(selected) = self.task_state.selected() else {
@@ -457,8 +457,13 @@ impl App {
                 let Some(task_display) = self.task_displays.get(selected) else {
                     return;
                 };
-                self.edit_title_buffer = task_display.task.title.clone();
-                self.edit_due_date_buffer = task_display.task.due_date.clone().unwrap_or_default();
+                self.edit_title_buffer = task_display.task.title.clone().into();
+                self.edit_due_date_buffer = task_display
+                    .task
+                    .due_date
+                    .clone()
+                    .unwrap_or_default()
+                    .into();
                 self.edit_field = EditField::Title;
             }
         }
@@ -472,28 +477,12 @@ impl App {
         };
     }
 
-    pub fn edit_active_field_push(&mut self, c: char) {
+    pub fn active_edit_input_mut(&mut self) -> &mut Input {
         match self.focus {
-            Focus::Workspaces => self.input_buffer.push(c),
+            Focus::Workspaces => &mut self.input_buffer,
             Focus::Tasks => match self.edit_field {
-                EditField::Title => self.edit_title_buffer.push(c),
-                EditField::DueDate => self.edit_due_date_buffer.push(c),
-            },
-        }
-    }
-
-    pub fn edit_active_field_pop(&mut self) {
-        match self.focus {
-            Focus::Workspaces => {
-                self.input_buffer.pop();
-            }
-            Focus::Tasks => match self.edit_field {
-                EditField::Title => {
-                    self.edit_title_buffer.pop();
-                }
-                EditField::DueDate => {
-                    self.edit_due_date_buffer.pop();
-                }
+                EditField::Title => &mut self.edit_title_buffer,
+                EditField::DueDate => &mut self.edit_due_date_buffer,
             },
         }
     }
@@ -504,7 +493,7 @@ impl App {
                 if let Some(selected) = self.workspace_state.selected() {
                     if let Some(workspace) = self.workspaces.get(selected) {
                         self.db
-                            .update_workspace_name(workspace.id, &self.input_buffer)
+                            .update_workspace_name(workspace.id, self.input_buffer.value())
                             .await?;
                         self.load_workspaces().await?;
                     }
@@ -513,7 +502,7 @@ impl App {
             Focus::Tasks => {
                 if let Some(selected) = self.task_state.selected() {
                     if let Some(task_display) = self.task_displays.get(selected) {
-                        let due_date = self.edit_due_date_buffer.trim();
+                        let due_date = self.edit_due_date_buffer.value().trim();
                         let normalized_due_date = if due_date.is_empty() {
                             None
                         } else {
@@ -524,7 +513,7 @@ impl App {
                         };
 
                         self.db
-                            .update_task_name(task_display.task.id, &self.edit_title_buffer)
+                            .update_task_name(task_display.task.id, self.edit_title_buffer.value())
                             .await?;
                         self.db
                             .update_task_due_date(
@@ -538,68 +527,17 @@ impl App {
             }
         }
         self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
-        self.edit_title_buffer.clear();
-        self.edit_due_date_buffer.clear();
+        self.input_buffer.reset();
+        self.edit_title_buffer.reset();
+        self.edit_due_date_buffer.reset();
         Ok(())
     }
 
     pub fn cancel_rename(&mut self) {
         self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
-        self.edit_title_buffer.clear();
-        self.edit_due_date_buffer.clear();
-    }
-
-    pub fn start_due_date_edit(&mut self) {
-        if self.focus != Focus::Tasks {
-            return;
-        }
-
-        let due_date = self
-            .task_state
-            .selected()
-            .and_then(|selected| self.task_displays.get(selected))
-            .and_then(|td| td.task.due_date.clone())
-            .unwrap_or_default();
-
-        self.input_buffer = due_date;
-        self.input_mode = InputMode::DueDate;
-    }
-
-    pub async fn finish_due_date_edit(&mut self) -> Result<()> {
-        let Some(selected) = self.task_state.selected() else {
-            self.cancel_due_date_edit();
-            return Ok(());
-        };
-        let Some(task_display) = self.task_displays.get(selected) else {
-            self.cancel_due_date_edit();
-            return Ok(());
-        };
-
-        let due_date = self.input_buffer.trim();
-        let normalized_due_date = if due_date.is_empty() {
-            None
-        } else {
-            let Ok(date) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") else {
-                return Ok(());
-            };
-            Some(date.format("%Y-%m-%d").to_string())
-        };
-
-        self.db
-            .update_task_due_date(task_display.task.id, normalized_due_date.as_deref())
-            .await?;
-        let current_selection = self.task_state.selected();
-        self.load_tasks_for_selected_workspace().await?;
-        self.task_state.select(current_selection);
-        self.cancel_due_date_edit();
-        Ok(())
-    }
-
-    pub fn cancel_due_date_edit(&mut self) {
-        self.input_mode = InputMode::Normal;
-        self.input_buffer.clear();
+        self.input_buffer.reset();
+        self.edit_title_buffer.reset();
+        self.edit_due_date_buffer.reset();
     }
 
     pub fn start_delete_confirm(&mut self) {
@@ -719,7 +657,7 @@ async fn run_app_loop(
         terminal.draw(|f| ui(f, app))?;
 
         match app.input_mode {
-            InputMode::Insert | InputMode::Creating | InputMode::Search | InputMode::DueDate => {
+            InputMode::Insert | InputMode::Creating | InputMode::Search => {
                 execute!(io::stdout(), SetCursorStyle::BlinkingBar)?;
             }
             _ => {
@@ -769,9 +707,6 @@ async fn run_app_loop(
                     KeyCode::Char('c') | KeyCode::Char(' ') => {
                         app.toggle_current_task_completion().await?;
                     }
-                    KeyCode::Char('d') => {
-                        app.start_due_date_edit();
-                    }
                     KeyCode::Char('e') => {
                         app.start_rename();
                     }
@@ -804,13 +739,19 @@ async fn run_app_loop(
                             app.toggle_edit_field();
                         }
                     }
-                    KeyCode::Backspace => {
-                        app.edit_active_field_pop();
+                    KeyCode::Up => {
+                        if app.focus == Focus::Tasks {
+                            app.edit_field = EditField::Title;
+                        }
                     }
-                    KeyCode::Char(c) => {
-                        app.edit_active_field_push(c);
+                    KeyCode::Down => {
+                        if app.focus == Focus::Tasks {
+                            app.edit_field = EditField::DueDate;
+                        }
                     }
-                    _ => {}
+                    _ => {
+                        app.active_edit_input_mut().handle_event(&Event::Key(key));
+                    }
                 },
                 InputMode::Creating => match key.code {
                     KeyCode::Enter => {
@@ -819,28 +760,9 @@ async fn run_app_loop(
                     KeyCode::Esc => {
                         app.cancel_creating();
                     }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
+                    _ => {
+                        app.input_buffer.handle_event(&Event::Key(key));
                     }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                    }
-                    _ => {}
-                },
-                InputMode::DueDate => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_due_date_edit().await?;
-                    }
-                    KeyCode::Esc => {
-                        app.cancel_due_date_edit();
-                    }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                    }
-                    _ => {}
                 },
                 InputMode::Search => match key.code {
                     KeyCode::Enter => {
@@ -849,15 +771,10 @@ async fn run_app_loop(
                     KeyCode::Esc => {
                         app.cancel_search();
                     }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
+                    _ => {
+                        app.input_buffer.handle_event(&Event::Key(key));
                         app.update_search();
                     }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                        app.update_search();
-                    }
-                    _ => {}
                 },
                 InputMode::DeleteConfirm => match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1004,7 +921,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
             match app.focus {
                 Focus::Workspaces => {
-                    let input = Paragraph::new(app.input_buffer.as_str())
+                    let input = Paragraph::new(app.input_buffer.value())
                         .block(
                             Block::default()
                                 .title("edit workspace")
@@ -1013,7 +930,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .style(Style::default().fg(Color::Yellow));
                     f.render_widget(input, popup_area);
                     f.set_cursor_position((
-                        popup_area.x + 1 + app.input_buffer.len() as u16,
+                        popup_area.x + 1 + app.input_buffer.visual_cursor() as u16,
                         popup_area.y + 1,
                     ));
                 }
@@ -1028,7 +945,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     } else {
                         "  "
                     };
-                    let due_date_line = if app.edit_due_date_buffer.is_empty() {
+                    let due_date_line = if app.edit_due_date_buffer.value().is_empty() {
                         Line::from(vec![
                             Span::raw(format!("{due_date_marker}due: ")),
                             Span::styled("YYYY-MM-DD", Style::default().fg(Color::DarkGray)),
@@ -1036,11 +953,14 @@ fn ui(f: &mut Frame, app: &mut App) {
                     } else {
                         Line::from(format!(
                             "{due_date_marker}due: {}",
-                            app.edit_due_date_buffer
+                            app.edit_due_date_buffer.value()
                         ))
                     };
                     let input = Paragraph::new(vec![
-                        Line::from(format!("{title_marker}title: {}", app.edit_title_buffer)),
+                        Line::from(format!(
+                            "{title_marker}title: {}",
+                            app.edit_title_buffer.value()
+                        )),
                         due_date_line,
                     ])
                     .block(Block::default().title("edit task").borders(Borders::ALL))
@@ -1054,7 +974,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                                 + 1
                                 + title_marker.len() as u16
                                 + 7
-                                + app.edit_title_buffer.len() as u16,
+                                + app.edit_title_buffer.visual_cursor() as u16,
                         ),
                         EditField::DueDate => (
                             popup_area.y + 2,
@@ -1062,7 +982,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                                 + 1
                                 + due_date_marker.len() as u16
                                 + 5
-                                + app.edit_due_date_buffer.len() as u16,
+                                + app.edit_due_date_buffer.visual_cursor() as u16,
                         ),
                     };
                     f.set_cursor_position((cursor_x, cursor_y));
@@ -1099,37 +1019,12 @@ fn ui(f: &mut Frame, app: &mut App) {
                     }
                 }
             };
-            let input = Paragraph::new(app.input_buffer.as_str())
+            let input = Paragraph::new(app.input_buffer.value())
                 .block(Block::default().title(title).borders(Borders::ALL))
                 .style(Style::default().fg(Color::Green));
             f.render_widget(input, popup_area);
             f.set_cursor_position((
-                popup_area.x + 1 + app.input_buffer.len() as u16,
-                popup_area.y + 1,
-            ));
-        }
-        InputMode::DueDate => {
-            let popup_area = centered_rect(60, 20, f.area());
-            f.render_widget(Clear, popup_area);
-
-            let input_line = if app.input_buffer.is_empty() {
-                Line::from(Span::styled(
-                    "YYYY-MM-DD",
-                    Style::default().fg(Color::DarkGray),
-                ))
-            } else {
-                Line::from(app.input_buffer.as_str())
-            };
-            let input = Paragraph::new(input_line)
-                .block(
-                    Block::default()
-                        .title("due date YYYY-MM-DD")
-                        .borders(Borders::ALL),
-                )
-                .style(Style::default().fg(Color::Yellow));
-            f.render_widget(input, popup_area);
-            f.set_cursor_position((
-                popup_area.x + 1 + app.input_buffer.len() as u16,
+                popup_area.x + 1 + app.input_buffer.visual_cursor() as u16,
                 popup_area.y + 1,
             ));
         }
@@ -1145,7 +1040,6 @@ Actions:
   A: add subtask (when on tasks) or workspace
   a: add new top-level task
   /: search tasks
-  d: set/clear due date
   e: edit selected item
   tab: switch edit fields
   s: reverse creation-date sort
@@ -1166,7 +1060,7 @@ Press ? or ESC to close"#;
     }
 
     let status_text = if app.input_mode == InputMode::Search {
-        format!("/{}", app.input_buffer)
+        format!("/{}", app.input_buffer.value())
     } else if app.search_query.trim().is_empty() {
         "q: quit | ?: help".to_string()
     } else {
@@ -1180,7 +1074,7 @@ Press ? or ESC to close"#;
     f.render_widget(status_bar, main_chunks[1]);
     if app.input_mode == InputMode::Search {
         f.set_cursor_position((
-            main_chunks[1].x + 1 + app.input_buffer.len() as u16,
+            main_chunks[1].x + 1 + app.input_buffer.visual_cursor() as u16,
             main_chunks[1].y,
         ));
     }
