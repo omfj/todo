@@ -12,13 +12,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::time::{Duration, Instant};
 
-use todo_core::{Database, Task, Workspace, WorkspaceStats};
+use todo_client::{Client, Task, Workspace, WorkspaceStats};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
 #[derive(Debug, Clone)]
@@ -57,7 +58,7 @@ pub struct App {
     pub workspace_state: ListState,
     pub task_state: ListState,
     pub selected_workspace: Option<usize>,
-    pub db: Database,
+    pub client: Client,
     pub focus: Focus,
     pub input_mode: InputMode,
     pub input_buffer: Input,
@@ -68,10 +69,16 @@ pub struct App {
     pub delete_target: Option<String>,
     pub creating_subtask: bool,
     pub sort_created_desc: bool,
+    pub notification: Option<Notification>,
+}
+
+pub struct Notification {
+    pub message: String,
+    pub created_at: Instant,
 }
 
 impl App {
-    pub fn new(db: Database) -> Self {
+    pub fn new(client: Client) -> Self {
         let mut workspace_state = ListState::default();
         workspace_state.select(Some(0));
 
@@ -83,7 +90,7 @@ impl App {
             workspace_state,
             task_state: ListState::default(),
             selected_workspace: Some(0),
-            db,
+            client,
             focus: Focus::Workspaces,
             input_mode: InputMode::Normal,
             input_buffer: Input::default(),
@@ -94,11 +101,33 @@ impl App {
             delete_target: None,
             creating_subtask: false,
             sort_created_desc: true,
+            notification: None,
+        }
+    }
+
+    pub fn notify_error(&mut self, action: &str, err: impl std::fmt::Display) {
+        self.notification = Some(Notification {
+            message: format!("{action}: {err}"),
+            created_at: Instant::now(),
+        });
+    }
+
+    pub fn clear_notification(&mut self) {
+        self.notification = None;
+    }
+
+    pub fn clear_expired_notification(&mut self) {
+        if self
+            .notification
+            .as_ref()
+            .is_some_and(|notification| notification.created_at.elapsed() >= Duration::from_secs(5))
+        {
+            self.clear_notification();
         }
     }
 
     pub async fn load_workspaces(&mut self) -> Result<()> {
-        self.workspaces = self.db.get_workspaces().await?;
+        self.workspaces = self.client.get_workspaces().await?;
         self.refresh_workspace_stats().await?;
         if !self.workspaces.is_empty() {
             self.workspace_state.select(Some(0));
@@ -109,24 +138,24 @@ impl App {
     }
 
     pub async fn load_tasks_for_selected_workspace(&mut self) -> Result<()> {
-        if let Some(selected) = self.selected_workspace {
-            if let Some(workspace) = self.workspaces.get(selected) {
-                self.tasks = self.db.get_tasks_for_workspace(workspace.id).await?;
-                self.refresh_workspace_stats().await?;
-                self.build_task_hierarchy();
-                self.task_state.select(if self.task_displays.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                });
-            }
+        if let Some(selected) = self.selected_workspace
+            && let Some(workspace) = self.workspaces.get(selected)
+        {
+            self.tasks = self.client.get_tasks_for_workspace(workspace.id).await?;
+            self.refresh_workspace_stats().await?;
+            self.build_task_hierarchy();
+            self.task_state.select(if self.task_displays.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         }
         Ok(())
     }
 
     async fn refresh_workspace_stats(&mut self) -> Result<()> {
         self.workspace_stats = self
-            .db
+            .client
             .get_workspace_stats()
             .await?
             .into_iter()
@@ -369,40 +398,37 @@ impl App {
 
         match self.focus {
             Focus::Workspaces => {
-                self.db.create_workspace(self.input_buffer.value()).await?;
+                self.client
+                    .create_workspace(self.input_buffer.value())
+                    .await?;
                 self.load_workspaces().await?;
             }
             Focus::Tasks => {
-                if let Some(selected) = self.selected_workspace {
-                    if let Some(workspace) = self.workspaces.get(selected) {
-                        if self.creating_subtask {
-                            if let Some(task_display_idx) = self.task_state.selected() {
-                                if let Some(task_display) = self.task_displays.get(task_display_idx)
-                                {
-                                    self.db
-                                        .create_subtask(
-                                            self.input_buffer.value(),
-                                            workspace.id,
-                                            task_display.task.id,
-                                        )
-                                        .await?;
-                                } else {
-                                    self.db
-                                        .create_task(self.input_buffer.value(), workspace.id)
-                                        .await?;
-                                }
+                if let Some(selected) = self.selected_workspace
+                    && let Some(workspace) = self.workspaces.get(selected)
+                {
+                    if self.creating_subtask {
+                        if let Some(task_display_idx) = self.task_state.selected() {
+                            if let Some(task_display) = self.task_displays.get(task_display_idx) {
+                                self.client
+                                    .create_subtask(
+                                        self.input_buffer.value(),
+                                        workspace.id,
+                                        task_display.task.id,
+                                    )
+                                    .await?;
                             } else {
-                                self.db
+                                self.client
                                     .create_task(self.input_buffer.value(), workspace.id)
                                     .await?;
                             }
                         } else {
-                            self.db
+                            self.client
                                 .create_task(self.input_buffer.value(), workspace.id)
                                 .await?;
                         }
-                        self.load_tasks_for_selected_workspace().await?;
                     }
+                    self.load_tasks_for_selected_workspace().await?;
                 }
             }
         }
@@ -416,25 +442,26 @@ impl App {
     }
 
     pub async fn toggle_current_task_completion(&mut self) -> Result<()> {
-        if self.focus == Focus::Tasks {
-            if let Some(selected_task_idx) = self.task_state.selected() {
-                if let Some(task_display) = self.task_displays.get(selected_task_idx) {
-                    self.db.toggle_task_completion(task_display.task.id).await?;
-                    let current_selection = self.task_state.selected();
-                    self.load_tasks_for_selected_workspace().await?;
-                    self.task_state.select(current_selection);
-                }
-            }
+        if self.focus == Focus::Tasks
+            && let Some(selected_task_idx) = self.task_state.selected()
+            && let Some(task_display) = self.task_displays.get(selected_task_idx)
+        {
+            self.client
+                .toggle_task_completion(task_display.task.id)
+                .await?;
+            let current_selection = self.task_state.selected();
+            self.load_tasks_for_selected_workspace().await?;
+            self.task_state.select(current_selection);
         }
         Ok(())
     }
 
     pub async fn archive_completed_tasks(&mut self) -> Result<()> {
-        if let Some(selected) = self.selected_workspace {
-            if let Some(workspace) = self.workspaces.get(selected) {
-                self.db.archive_completed_tasks(workspace.id).await?;
-                self.load_tasks_for_selected_workspace().await?;
-            }
+        if let Some(selected) = self.selected_workspace
+            && let Some(workspace) = self.workspaces.get(selected)
+        {
+            self.client.archive_completed_tasks(workspace.id).await?;
+            self.load_tasks_for_selected_workspace().await?;
         }
         Ok(())
     }
@@ -490,39 +517,36 @@ impl App {
     pub async fn finish_rename(&mut self) -> Result<()> {
         match self.focus {
             Focus::Workspaces => {
-                if let Some(selected) = self.workspace_state.selected() {
-                    if let Some(workspace) = self.workspaces.get(selected) {
-                        self.db
-                            .update_workspace_name(workspace.id, self.input_buffer.value())
-                            .await?;
-                        self.load_workspaces().await?;
-                    }
+                if let Some(selected) = self.workspace_state.selected()
+                    && let Some(workspace) = self.workspaces.get(selected)
+                {
+                    self.client
+                        .update_workspace_name(workspace.id, self.input_buffer.value())
+                        .await?;
+                    self.load_workspaces().await?;
                 }
             }
             Focus::Tasks => {
-                if let Some(selected) = self.task_state.selected() {
-                    if let Some(task_display) = self.task_displays.get(selected) {
-                        let due_date = self.edit_due_date_buffer.value().trim();
-                        let normalized_due_date = if due_date.is_empty() {
-                            None
-                        } else {
-                            let Ok(date) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") else {
-                                return Ok(());
-                            };
-                            Some(date.format("%Y-%m-%d").to_string())
+                if let Some(selected) = self.task_state.selected()
+                    && let Some(task_display) = self.task_displays.get(selected)
+                {
+                    let due_date = self.edit_due_date_buffer.value().trim();
+                    let normalized_due_date = if due_date.is_empty() {
+                        None
+                    } else {
+                        let Ok(date) = NaiveDate::parse_from_str(due_date, "%Y-%m-%d") else {
+                            return Ok(());
                         };
+                        Some(date.format("%Y-%m-%d").to_string())
+                    };
 
-                        self.db
-                            .update_task_name(task_display.task.id, self.edit_title_buffer.value())
-                            .await?;
-                        self.db
-                            .update_task_due_date(
-                                task_display.task.id,
-                                normalized_due_date.as_deref(),
-                            )
-                            .await?;
-                        self.load_tasks_for_selected_workspace().await?;
-                    }
+                    self.client
+                        .update_task_name(task_display.task.id, self.edit_title_buffer.value())
+                        .await?;
+                    self.client
+                        .update_task_due_date(task_display.task.id, normalized_due_date.as_deref())
+                        .await?;
+                    self.load_tasks_for_selected_workspace().await?;
                 }
             }
         }
@@ -570,36 +594,36 @@ impl App {
     pub async fn confirm_delete(&mut self) -> Result<()> {
         match self.focus {
             Focus::Workspaces => {
-                if let Some(selected) = self.workspace_state.selected() {
-                    if let Some(workspace) = self.workspaces.get(selected) {
-                        self.db.delete_workspace(workspace.id).await?;
-                        self.load_workspaces().await?;
-                        if !self.workspaces.is_empty() {
-                            let new_selection = if selected >= self.workspaces.len() {
-                                self.workspaces.len() - 1
-                            } else {
-                                selected
-                            };
-                            self.workspace_state.select(Some(new_selection));
-                            self.selected_workspace = Some(new_selection);
-                            self.load_tasks_for_selected_workspace().await?;
-                        }
+                if let Some(selected) = self.workspace_state.selected()
+                    && let Some(workspace) = self.workspaces.get(selected)
+                {
+                    self.client.delete_workspace(workspace.id).await?;
+                    self.load_workspaces().await?;
+                    if !self.workspaces.is_empty() {
+                        let new_selection = if selected >= self.workspaces.len() {
+                            self.workspaces.len() - 1
+                        } else {
+                            selected
+                        };
+                        self.workspace_state.select(Some(new_selection));
+                        self.selected_workspace = Some(new_selection);
+                        self.load_tasks_for_selected_workspace().await?;
                     }
                 }
             }
             Focus::Tasks => {
-                if let Some(selected) = self.task_state.selected() {
-                    if let Some(task_display) = self.task_displays.get(selected) {
-                        self.db.delete_task(task_display.task.id).await?;
-                        self.load_tasks_for_selected_workspace().await?;
-                        if !self.task_displays.is_empty() {
-                            let new_selection = if selected >= self.task_displays.len() {
-                                self.task_displays.len() - 1
-                            } else {
-                                selected
-                            };
-                            self.task_state.select(Some(new_selection));
-                        }
+                if let Some(selected) = self.task_state.selected()
+                    && let Some(task_display) = self.task_displays.get(selected)
+                {
+                    self.client.delete_task(task_display.task.id).await?;
+                    self.load_tasks_for_selected_workspace().await?;
+                    if !self.task_displays.is_empty() {
+                        let new_selection = if selected >= self.task_displays.len() {
+                            self.task_displays.len() - 1
+                        } else {
+                            selected
+                        };
+                        self.task_state.select(Some(new_selection));
                     }
                 }
             }
@@ -622,15 +646,17 @@ impl App {
     }
 }
 
-pub async fn run_app(db: Database) -> Result<()> {
+pub async fn run_app(client: Client) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(db);
-    app.load_workspaces().await?;
+    let mut app = App::new(client);
+    if let Err(err) = app.load_workspaces().await {
+        app.notify_error("Could not load workspaces", err);
+    }
 
     let res = run_app_loop(&mut terminal, &mut app).await;
 
@@ -654,6 +680,7 @@ async fn run_app_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
+        app.clear_expired_notification();
         terminal.draw(|f| ui(f, app))?;
 
         match app.input_mode {
@@ -665,16 +692,26 @@ async fn run_app_loop(
             }
         }
 
+        if !event::poll(Duration::from_millis(250))? {
+            continue;
+        }
+
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Down | KeyCode::Char('j') => match app.focus {
-                        Focus::Workspaces => app.next_workspace().await?,
+                        Focus::Workspaces => match app.next_workspace().await {
+                            Ok(()) => app.clear_notification(),
+                            Err(err) => app.notify_error("Could not load workspace", err),
+                        },
                         Focus::Tasks => app.next_task(),
                     },
                     KeyCode::Up | KeyCode::Char('k') => match app.focus {
-                        Focus::Workspaces => app.previous_workspace().await?,
+                        Focus::Workspaces => match app.previous_workspace().await {
+                            Ok(()) => app.clear_notification(),
+                            Err(err) => app.notify_error("Could not load workspace", err),
+                        },
                         Focus::Tasks => app.previous_task(),
                     },
                     KeyCode::Right | KeyCode::Char('l') => {
@@ -689,10 +726,8 @@ async fn run_app_loop(
                             Focus::Tasks => Focus::Workspaces,
                         };
                     }
-                    KeyCode::Esc => {
-                        if !app.search_query.is_empty() {
-                            app.cancel_search();
-                        }
+                    KeyCode::Esc if !app.search_query.is_empty() => {
+                        app.cancel_search();
                     }
                     KeyCode::Char('A') => {
                         if app.focus == Focus::Tasks {
@@ -705,7 +740,10 @@ async fn run_app_loop(
                         app.start_creating_task();
                     }
                     KeyCode::Char('c') | KeyCode::Char(' ') => {
-                        app.toggle_current_task_completion().await?;
+                        match app.toggle_current_task_completion().await {
+                            Ok(()) => app.clear_notification(),
+                            Err(err) => app.notify_error("Could not update task", err),
+                        }
                     }
                     KeyCode::Char('e') => {
                         app.start_rename();
@@ -716,9 +754,10 @@ async fn run_app_loop(
                     KeyCode::Char('s') => {
                         app.toggle_sort_order();
                     }
-                    KeyCode::Char('x') => {
-                        app.archive_completed_tasks().await?;
-                    }
+                    KeyCode::Char('x') => match app.archive_completed_tasks().await {
+                        Ok(()) => app.clear_notification(),
+                        Err(err) => app.notify_error("Could not archive tasks", err),
+                    },
                     KeyCode::Char('D') => {
                         app.start_delete_confirm();
                     }
@@ -728,9 +767,10 @@ async fn run_app_loop(
                     _ => {}
                 },
                 InputMode::Insert => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_rename().await?;
-                    }
+                    KeyCode::Enter => match app.finish_rename().await {
+                        Ok(()) => app.clear_notification(),
+                        Err(err) => app.notify_error("Could not save changes", err),
+                    },
                     KeyCode::Esc => {
                         app.cancel_rename();
                     }
@@ -754,9 +794,10 @@ async fn run_app_loop(
                     }
                 },
                 InputMode::Creating => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_creating().await?;
-                    }
+                    KeyCode::Enter => match app.finish_creating().await {
+                        Ok(()) => app.clear_notification(),
+                        Err(err) => app.notify_error("Could not create item", err),
+                    },
                     KeyCode::Esc => {
                         app.cancel_creating();
                     }
@@ -778,7 +819,10 @@ async fn run_app_loop(
                 },
                 InputMode::DeleteConfirm => match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        app.confirm_delete().await?;
+                        match app.confirm_delete().await {
+                            Ok(()) => app.clear_notification(),
+                            Err(err) => app.notify_error("Could not delete item", err),
+                        }
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         app.cancel_delete_confirm();
@@ -1078,6 +1122,21 @@ Press ? or ESC to close"#;
             main_chunks[1].y,
         ));
     }
+
+    if let Some(notification) = &app.notification {
+        let notification_area = top_right_rect(f.area(), 56, 5);
+        f.render_widget(Clear, notification_area);
+        let notification = Paragraph::new(notification.message.as_str())
+            .block(
+                Block::default()
+                    .title("error")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red)),
+            )
+            .style(Style::default().fg(Color::Red))
+            .wrap(Wrap { trim: true });
+        f.render_widget(notification, notification_area);
+    }
 }
 
 fn fuzzy_matches(text: &str, query: &str) -> bool {
@@ -1116,4 +1175,18 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn top_right_rect(area: Rect, max_width: u16, height: u16) -> Rect {
+    let width = max_width.min(area.width.saturating_sub(2)).max(1);
+    let height = height.min(area.height).max(1);
+    let x = area.x + area.width.saturating_sub(width + 1);
+    let y = area.y;
+
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
 }

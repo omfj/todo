@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
-use sqlx::FromRow;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: i64,
     pub name: String,
@@ -11,14 +11,14 @@ pub struct Workspace {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceStats {
     pub workspace_id: i64,
     pub completed: i64,
     pub total: i64,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: i64,
     pub title: String,

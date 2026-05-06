@@ -1,5 +1,5 @@
-pub mod db;
+pub mod client;
 pub mod models;
 
-pub use db::Database;
+pub use client::Client;
 pub use models::{Task, Workspace, WorkspaceStats};

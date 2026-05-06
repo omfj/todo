@@ -1,12 +1,16 @@
-use todo_core::Database;
+use todo_client::Client;
 
 mod ui;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let db = Database::connect().await?;
+    dotenvy::dotenv().ok();
 
-    ui::run_app(db).await?;
+    let endpoint_url =
+        std::env::var("ENDPOINT_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
+    let client = Client::new(endpoint_url);
+
+    ui::run_app(client).await?;
 
     Ok(())
 }
