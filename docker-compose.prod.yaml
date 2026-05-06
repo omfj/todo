@@ -1,0 +1,16 @@
+services:
+  todo-api:
+    build:
+      context: .
+      dockerfile: todo-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: sqlite:///data/todo.db?mode=rwc
+      RUST_LOG: todo_api=info,tower_http=info
+    ports:
+      - "3000:3000"
+    volumes:
+      - todo-data:/data
+
+volumes:
+  todo-data:
