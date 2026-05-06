@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 pub struct WorkspacesResponse {
-    pub workspaces: Vec<todo_client::Workspace>,
+    pub workspaces: Vec<todo_client::EncryptedWorkspace>,
     pub stats: Vec<todo_client::WorkspaceStats>,
 }
 
@@ -13,24 +13,24 @@ pub struct IdResponse {
 
 #[derive(Deserialize)]
 pub struct CreateWorkspaceRequest {
-    pub name: String,
+    pub name: todo_client::EncryptedField,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateWorkspaceRequest {
-    pub name: String,
+    pub name: todo_client::EncryptedField,
 }
 
 #[derive(Deserialize)]
 pub struct CreateTaskRequest {
-    pub title: String,
+    pub title: todo_client::EncryptedField,
     pub parent_task_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateTaskRequest {
-    pub title: Option<String>,
-    pub due_date: Option<String>,
+    pub title: Option<todo_client::EncryptedField>,
+    pub due_date: Option<todo_client::EncryptedField>,
     #[serde(default)]
     pub due_date_set: bool,
 }

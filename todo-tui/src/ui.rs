@@ -9,7 +9,7 @@ use ratatui::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use todo_client::{Client, Task, Workspace, WorkspaceStats};
 use tui_input::{Input, backend::crossterm::EventHandler};
+
+use crate::ui_helpers::{centered_rect, fuzzy_matches, top_right_rect};
 
 #[derive(Debug, Clone)]
 pub struct TaskDisplay {
@@ -427,6 +429,10 @@ impl App {
                                 .create_task(self.input_buffer.value(), workspace.id)
                                 .await?;
                         }
+                    } else {
+                        self.client
+                            .create_task(self.input_buffer.value(), workspace.id)
+                            .await?;
                     }
                     self.load_tasks_for_selected_workspace().await?;
                 }
@@ -1136,57 +1142,5 @@ Press ? or ESC to close"#;
             .style(Style::default().fg(Color::Red))
             .wrap(Wrap { trim: true });
         f.render_widget(notification, notification_area);
-    }
-}
-
-fn fuzzy_matches(text: &str, query: &str) -> bool {
-    let mut query_chars = query.chars();
-    let Some(mut query_char) = query_chars.next() else {
-        return true;
-    };
-
-    for text_char in text.chars().flat_map(char::to_lowercase) {
-        if text_char == query_char {
-            match query_chars.next() {
-                Some(next_query_char) => query_char = next_query_char,
-                None => return true,
-            }
-        }
-    }
-
-    false
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
-}
-
-fn top_right_rect(area: Rect, max_width: u16, height: u16) -> Rect {
-    let width = max_width.min(area.width.saturating_sub(2)).max(1);
-    let height = height.min(area.height).max(1);
-    let x = area.x + area.width.saturating_sub(width + 1);
-    let y = area.y;
-
-    Rect {
-        x,
-        y,
-        width,
-        height,
     }
 }

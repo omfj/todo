@@ -2,7 +2,7 @@ use std::{env, path::Path};
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, sqlite::SqlitePool};
-use todo_client::{Task, Workspace, WorkspaceStats};
+use todo_client::{EncryptedField, EncryptedTask, EncryptedWorkspace, WorkspaceStats};
 
 pub struct Database {
     pool: SqlitePool,
@@ -19,6 +19,9 @@ impl Database {
         }
 
         let pool = SqlitePool::connect(&database_url).await?;
+        sqlx::query("PRAGMA journal_mode = WAL")
+            .execute(&pool)
+            .await?;
 
         Ok(Database { pool })
     }
@@ -32,81 +35,114 @@ impl Database {
         Ok(())
     }
 
-    pub async fn get_workspaces(&self) -> anyhow::Result<Vec<Workspace>> {
+    pub async fn ensure_user(&self, user_id: &str) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR IGNORE INTO users (id) VALUES (?)")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_workspaces(&self, user_id: &str) -> anyhow::Result<Vec<EncryptedWorkspace>> {
         let rows = sqlx::query_as::<_, WorkspaceRow>(
-            "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY name",
+            "SELECT id, name, created_at, updated_at FROM workspaces WHERE user_id = ? ORDER BY created_at",
         )
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(WorkspaceRow::try_into).collect()
     }
 
-    pub async fn get_workspace_stats(&self) -> anyhow::Result<Vec<WorkspaceStats>> {
+    pub async fn get_workspace_stats(&self, user_id: &str) -> anyhow::Result<Vec<WorkspaceStats>> {
         let rows = sqlx::query_as::<_, WorkspaceStatsRow>(
             "SELECT w.id AS workspace_id,
                     COALESCE(SUM(CASE WHEN t.completed = 1 THEN 1 ELSE 0 END), 0) AS completed,
                     COUNT(t.id) AS total
              FROM workspaces w
-             LEFT JOIN tasks t ON t.workspace_id = w.id AND t.archived = 0
+             LEFT JOIN tasks t ON t.user_id = w.user_id AND t.workspace_id = w.id AND t.archived = 0
+             WHERE w.user_id = ?
              GROUP BY w.id",
         )
+        .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
 
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    pub async fn get_tasks_for_workspace(&self, workspace_id: i64) -> anyhow::Result<Vec<Task>> {
+    pub async fn get_tasks_for_workspace(
+        &self,
+        user_id: &str,
+        workspace_id: i64,
+    ) -> anyhow::Result<Vec<EncryptedTask>> {
         let rows = sqlx::query_as::<_, TaskRow>(
             "SELECT id, title, description, completed, archived, due_date, workspace_id, parent_task_id, created_at, updated_at
-             FROM tasks WHERE workspace_id = ? AND archived = 0 ORDER BY created_at",
+             FROM tasks WHERE user_id = ? AND workspace_id = ? AND archived = 0 ORDER BY created_at",
         )
+        .bind(user_id)
         .bind(workspace_id)
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TaskRow::try_into).collect()
     }
 
-    pub async fn create_workspace(&self, name: &str) -> anyhow::Result<i64> {
-        let result = sqlx::query("INSERT INTO workspaces (name) VALUES (?)")
-            .bind(name)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.last_insert_rowid())
-    }
-
-    pub async fn create_task(&self, title: &str, workspace_id: i64) -> anyhow::Result<i64> {
-        let result = sqlx::query("INSERT INTO tasks (title, workspace_id) VALUES (?, ?)")
-            .bind(title)
-            .bind(workspace_id)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.last_insert_rowid())
-    }
-
-    pub async fn create_subtask(
+    pub async fn create_workspace(
         &self,
-        title: &str,
+        user_id: &str,
+        name: &EncryptedField,
+    ) -> anyhow::Result<i64> {
+        let result = sqlx::query("INSERT INTO workspaces (user_id, name) VALUES (?, ?)")
+            .bind(user_id)
+            .bind(encrypted_field_to_string(name)?)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn create_task(
+        &self,
+        user_id: &str,
+        title: &EncryptedField,
         workspace_id: i64,
-        parent_task_id: i64,
     ) -> anyhow::Result<i64> {
         let result =
-            sqlx::query("INSERT INTO tasks (title, workspace_id, parent_task_id) VALUES (?, ?, ?)")
-                .bind(title)
+            sqlx::query("INSERT INTO tasks (user_id, title, workspace_id) VALUES (?, ?, ?)")
+                .bind(user_id)
+                .bind(encrypted_field_to_string(title)?)
                 .bind(workspace_id)
-                .bind(parent_task_id)
                 .execute(&self.pool)
                 .await?;
 
         Ok(result.last_insert_rowid())
     }
 
-    pub async fn toggle_task_completion(&self, task_id: i64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE tasks SET completed = NOT completed WHERE id = ?")
+    pub async fn create_subtask(
+        &self,
+        user_id: &str,
+        title: &EncryptedField,
+        workspace_id: i64,
+        parent_task_id: i64,
+    ) -> anyhow::Result<i64> {
+        let result = sqlx::query(
+            "INSERT INTO tasks (user_id, title, workspace_id, parent_task_id) VALUES (?, ?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(encrypted_field_to_string(title)?)
+        .bind(workspace_id)
+        .bind(parent_task_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    pub async fn toggle_task_completion(&self, user_id: &str, task_id: i64) -> anyhow::Result<()> {
+        sqlx::query("UPDATE tasks SET completed = NOT completed WHERE user_id = ? AND id = ?")
+            .bind(user_id)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
@@ -114,8 +150,15 @@ impl Database {
         Ok(())
     }
 
-    pub async fn archive_completed_tasks(&self, workspace_id: i64) -> anyhow::Result<()> {
-        sqlx::query("UPDATE tasks SET archived = 1 WHERE workspace_id = ? AND completed = 1")
+    pub async fn archive_completed_tasks(
+        &self,
+        user_id: &str,
+        workspace_id: i64,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "UPDATE tasks SET archived = 1 WHERE user_id = ? AND workspace_id = ? AND completed = 1",
+        )
+            .bind(user_id)
             .bind(workspace_id)
             .execute(&self.pool)
             .await?;
@@ -123,9 +166,15 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_workspace_name(&self, workspace_id: i64, name: &str) -> anyhow::Result<()> {
-        sqlx::query("UPDATE workspaces SET name = ? WHERE id = ?")
-            .bind(name)
+    pub async fn update_workspace_name(
+        &self,
+        user_id: &str,
+        workspace_id: i64,
+        name: &EncryptedField,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE workspaces SET name = ? WHERE user_id = ? AND id = ?")
+            .bind(encrypted_field_to_string(name)?)
+            .bind(user_id)
             .bind(workspace_id)
             .execute(&self.pool)
             .await?;
@@ -133,9 +182,15 @@ impl Database {
         Ok(())
     }
 
-    pub async fn update_task_name(&self, task_id: i64, title: &str) -> anyhow::Result<()> {
-        sqlx::query("UPDATE tasks SET title = ? WHERE id = ?")
-            .bind(title)
+    pub async fn update_task_name(
+        &self,
+        user_id: &str,
+        task_id: i64,
+        title: &EncryptedField,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE tasks SET title = ? WHERE user_id = ? AND id = ?")
+            .bind(encrypted_field_to_string(title)?)
+            .bind(user_id)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
@@ -145,11 +200,13 @@ impl Database {
 
     pub async fn update_task_due_date(
         &self,
+        user_id: &str,
         task_id: i64,
-        due_date: Option<&str>,
+        due_date: Option<&EncryptedField>,
     ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE tasks SET due_date = ? WHERE id = ?")
-            .bind(due_date)
+        sqlx::query("UPDATE tasks SET due_date = ? WHERE user_id = ? AND id = ?")
+            .bind(due_date.map(encrypted_field_to_string).transpose()?)
+            .bind(user_id)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
@@ -157,13 +214,15 @@ impl Database {
         Ok(())
     }
 
-    pub async fn delete_workspace(&self, workspace_id: i64) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM tasks WHERE workspace_id = ?")
+    pub async fn delete_workspace(&self, user_id: &str, workspace_id: i64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM tasks WHERE user_id = ? AND workspace_id = ?")
+            .bind(user_id)
             .bind(workspace_id)
             .execute(&self.pool)
             .await?;
 
-        sqlx::query("DELETE FROM workspaces WHERE id = ?")
+        sqlx::query("DELETE FROM workspaces WHERE user_id = ? AND id = ?")
+            .bind(user_id)
             .bind(workspace_id)
             .execute(&self.pool)
             .await?;
@@ -171,8 +230,9 @@ impl Database {
         Ok(())
     }
 
-    pub async fn delete_task(&self, task_id: i64) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM tasks WHERE id = ?")
+    pub async fn delete_task(&self, user_id: &str, task_id: i64) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM tasks WHERE user_id = ? AND id = ?")
+            .bind(user_id)
             .bind(task_id)
             .execute(&self.pool)
             .await?;
@@ -202,14 +262,16 @@ struct WorkspaceRow {
     updated_at: DateTime<Utc>,
 }
 
-impl From<WorkspaceRow> for Workspace {
-    fn from(row: WorkspaceRow) -> Self {
-        Self {
+impl TryFrom<WorkspaceRow> for EncryptedWorkspace {
+    type Error = anyhow::Error;
+
+    fn try_from(row: WorkspaceRow) -> anyhow::Result<Self> {
+        Ok(Self {
             id: row.id,
-            name: row.name,
+            name: encrypted_field_from_string(&row.name)?,
             created_at: row.created_at,
             updated_at: row.updated_at,
-        }
+        })
     }
 }
 
@@ -244,19 +306,37 @@ struct TaskRow {
     updated_at: DateTime<Utc>,
 }
 
-impl From<TaskRow> for Task {
-    fn from(row: TaskRow) -> Self {
-        Self {
+impl TryFrom<TaskRow> for EncryptedTask {
+    type Error = anyhow::Error;
+
+    fn try_from(row: TaskRow) -> anyhow::Result<Self> {
+        Ok(Self {
             id: row.id,
-            title: row.title,
-            description: row.description,
+            title: encrypted_field_from_string(&row.title)?,
+            description: row
+                .description
+                .as_deref()
+                .map(encrypted_field_from_string)
+                .transpose()?,
             completed: row.completed,
             archived: row.archived,
-            due_date: row.due_date,
+            due_date: row
+                .due_date
+                .as_deref()
+                .map(encrypted_field_from_string)
+                .transpose()?,
             workspace_id: row.workspace_id,
             parent_task_id: row.parent_task_id,
             created_at: row.created_at,
             updated_at: row.updated_at,
-        }
+        })
     }
+}
+
+fn encrypted_field_to_string(field: &EncryptedField) -> anyhow::Result<String> {
+    serde_json::to_string(field).map_err(Into::into)
+}
+
+fn encrypted_field_from_string(value: &str) -> anyhow::Result<EncryptedField> {
+    serde_json::from_str(value).map_err(Into::into)
 }

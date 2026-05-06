@@ -5,23 +5,38 @@ use axum::{
 };
 use serde::Serialize;
 
-pub struct ApiError(anyhow::Error);
+pub struct ApiError {
+    status: StatusCode,
+    error: anyhow::Error,
+}
+
+impl ApiError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: anyhow::anyhow!(message.into()),
+        }
+    }
+}
 
 impl<E> From<E> for ApiError
 where
     E: Into<anyhow::Error>,
 {
     fn from(error: E) -> Self {
-        Self(error.into())
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: error.into(),
+        }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            self.status,
             Json(ErrorResponse {
-                error: self.0.to_string(),
+                error: self.error.to_string(),
             }),
         )
             .into_response()

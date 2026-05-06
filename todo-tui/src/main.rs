@@ -1,14 +1,16 @@
-use todo_client::Client;
+use todo_client::{Client, CryptoKey};
 
+mod config;
 mod ui;
+mod ui_helpers;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    let endpoint_url =
-        std::env::var("ENDPOINT_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
-    let client = Client::new(endpoint_url);
+    let config = config::load_or_create_config()?;
+    let crypto = CryptoKey::from_recovery_phrase(&config.general.phrase);
+    let client = Client::new(config.general.endpoint, crypto);
 
     ui::run_app(client).await?;
 
