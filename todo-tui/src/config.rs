@@ -4,10 +4,14 @@ use std::{
     path::PathBuf,
 };
 
+use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use todo_client::{generate_recovery_phrase, normalize_phrase_for_storage};
 
 const DEFAULT_ENDPOINT: &str = "api.todo.omfj.no";
+const KEYCHAIN_SERVICE: &str = "todo";
+const KEYCHAIN_ACCOUNT: &str = "phrase";
+const DEV_KEYCHAIN_ACCOUNT: &str = "phrase_dev";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -17,20 +21,23 @@ pub struct Config {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralConfig {
-    pub phrase: String,
     pub endpoint: String,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            phrase: String::new(),
             endpoint: DEFAULT_ENDPOINT.to_string(),
         }
     }
 }
 
-pub fn load_or_create_config() -> anyhow::Result<Config> {
+pub struct AppConfig {
+    pub endpoint: String,
+    pub phrase: String,
+}
+
+pub fn load_or_create_config() -> anyhow::Result<AppConfig> {
     let path = config_path()?;
     let mut config = read_config(&path)?;
     let mut changed = false;
@@ -40,15 +47,8 @@ pub fn load_or_create_config() -> anyhow::Result<Config> {
         changed = true;
     }
 
-    if config.general.phrase.trim().is_empty()
-        || normalize_phrase_for_storage(&config.general.phrase).is_none()
-    {
-        config.general.phrase = prompt_for_recovery_phrase(&path)?;
-        changed = true;
-    } else if let Some(phrase) = normalize_phrase_for_storage(&config.general.phrase)
-        && phrase != config.general.phrase
-    {
-        config.general.phrase = phrase;
+    if let Ok(endpoint) = std::env::var("ENDPOINT_URL") {
+        config.general.endpoint = endpoint;
         changed = true;
     }
 
@@ -56,7 +56,12 @@ pub fn load_or_create_config() -> anyhow::Result<Config> {
         write_config(&path, &config)?;
     }
 
-    Ok(config)
+    let phrase = load_or_create_phrase(is_development())?;
+
+    Ok(AppConfig {
+        endpoint: config.general.endpoint,
+        phrase,
+    })
 }
 
 fn read_config(path: &PathBuf) -> anyhow::Result<Config> {
@@ -76,7 +81,39 @@ fn write_config(path: &PathBuf, config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prompt_for_recovery_phrase(path: &PathBuf) -> anyhow::Result<String> {
+fn load_or_create_phrase(is_development: bool) -> anyhow::Result<String> {
+    if let Ok(phrase) = std::env::var("TODO_PHRASE") {
+        return normalize_phrase_for_storage(&phrase)
+            .ok_or_else(|| anyhow::anyhow!("TODO_PHRASE must be a valid 12-word phrase"));
+    }
+
+    if let Some(phrase) = load_phrase_from_keychain(is_development)?
+        && let Some(phrase) = normalize_phrase_for_storage(&phrase)
+    {
+        return Ok(phrase);
+    }
+
+    let phrase = prompt_for_recovery_phrase()?;
+    store_phrase_in_keychain(is_development, &phrase)?;
+    Ok(phrase)
+}
+
+fn load_phrase_from_keychain(is_development: bool) -> anyhow::Result<Option<String>> {
+    let entry = Entry::new(KEYCHAIN_SERVICE, keychain_account(is_development))?;
+    match entry.get_password() {
+        Ok(phrase) => Ok(Some(phrase)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn store_phrase_in_keychain(is_development: bool, phrase: &str) -> anyhow::Result<()> {
+    let entry = Entry::new(KEYCHAIN_SERVICE, keychain_account(is_development))?;
+    entry.set_password(phrase)?;
+    Ok(())
+}
+
+fn prompt_for_recovery_phrase() -> anyhow::Result<String> {
     println!("Paste an existing recovery phrase, or press Enter to generate a new one:");
     print!("> ");
     io::stdout().flush()?;
@@ -96,7 +133,7 @@ fn prompt_for_recovery_phrase(path: &PathBuf) -> anyhow::Result<String> {
     println!(
         "Store this phrase somewhere safe. You need it to decrypt this data on another device."
     );
-    println!("Saved locally in {} for this device.", path.display());
+    println!("Saved locally in the OS keychain for this device.");
     print!("Press Enter to continue...");
     io::stdout().flush()?;
 
@@ -106,16 +143,16 @@ fn prompt_for_recovery_phrase(path: &PathBuf) -> anyhow::Result<String> {
     Ok(phrase)
 }
 
-fn config_path() -> anyhow::Result<PathBuf> {
-    let is_development = std::env::var("DEVELOPMENT")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(false);
-
-    let filename = if is_development {
+fn config_file_name() -> &'static str {
+    if is_development() {
         "config.dev.toml"
     } else {
         "config.toml"
-    };
+    }
+}
+
+fn config_path() -> anyhow::Result<PathBuf> {
+    let filename = config_file_name();
     Ok(xdg_config_home()?.join("todo").join(filename))
 }
 
@@ -127,4 +164,18 @@ fn xdg_config_home() -> anyhow::Result<PathBuf> {
     }
     let home = std::env::var("HOME")?;
     Ok(PathBuf::from(home).join(".config"))
+}
+
+fn keychain_account(is_development: bool) -> &'static str {
+    if is_development {
+        DEV_KEYCHAIN_ACCOUNT
+    } else {
+        KEYCHAIN_ACCOUNT
+    }
+}
+
+fn is_development() -> bool {
+    std::env::var("DEVELOPMENT")
+        .map(|v| v.to_lowercase() == "true")
+        .unwrap_or(false)
 }

@@ -9,8 +9,8 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let config = config::load_or_create_config()?;
-    let crypto = CryptoKey::from_recovery_phrase(&config.general.phrase);
-    let client = Client::new(config.general.endpoint, crypto);
+    let crypto = CryptoKey::from_recovery_phrase(&config.phrase);
+    let client = Client::new(config.endpoint, crypto);
 
     ui::run_app(client).await?;
 
