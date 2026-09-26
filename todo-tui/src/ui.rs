@@ -84,7 +84,7 @@ impl App {
             task_state: ListState::default(),
             selected_workspace: Some(0),
             db,
-            focus: Focus::Workspaces,
+            focus: Focus::Tasks,
             input_mode: InputMode::Normal,
             input_buffer: Input::default(),
             edit_title_buffer: Input::default(),
