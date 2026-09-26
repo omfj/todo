@@ -325,6 +325,18 @@ impl App {
         });
     }
 
+    pub async fn toggle_show_dates(&mut self) -> Result<()> {
+        if let Some(selected) = self.selected_workspace
+            && let Some(workspace) = self.workspaces.get_mut(selected)
+        {
+            workspace.show_dates = !workspace.show_dates;
+            self.db
+                .set_workspace_show_dates(workspace.id, workspace.show_dates)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub fn start_search(&mut self) {
         self.input_buffer = self.search_query.clone().into();
         self.input_mode = InputMode::Search;
@@ -728,6 +740,7 @@ impl App {
                 }
             }
             Command::ToggleSort => self.toggle_sort_order(),
+            Command::ToggleDates => self.toggle_show_dates().await?,
             Command::ArchiveCompleted => self.archive_completed_tasks().await?,
             Command::Delete => self.start_delete_confirm(),
             Command::ShowHelp => self.show_help(),
@@ -885,6 +898,10 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     f.render_stateful_widget(workspaces, content_chunks[0], &mut app.workspace_state);
 
+    let show_dates = app
+        .selected_workspace
+        .and_then(|idx| app.workspaces.get(idx))
+        .is_none_or(|w| w.show_dates);
     let task_items: Vec<ListItem> = app
         .task_displays
         .iter()
@@ -894,8 +911,8 @@ fn ui(f: &mut Frame, app: &mut App) {
             let date = td.task.created_at.format("%m/%d/%y").to_string();
 
             let task_span = Span::raw(format!("{}[{}] {}", indent, checkbox, td.task.title));
-            let date_span =
-                Span::styled(format!(" ({date})"), Style::default().fg(Color::DarkGray));
+            let date_span = show_dates
+                .then(|| Span::styled(format!(" ({date})"), Style::default().fg(Color::DarkGray)));
             let today = Local::now().date_naive();
             let due_date_span = td.task.due_date.as_ref().map(|due_date| {
                 let due_date_color = match NaiveDate::parse_from_str(due_date, "%Y-%m-%d") {
@@ -909,21 +926,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             });
 
             if td.task.completed {
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{}[{}] {}", indent, checkbox, td.task.title),
-                        Style::default()
-                            .add_modifier(Modifier::CROSSED_OUT)
-                            .fg(Color::DarkGray),
-                    ),
-                    date_span,
-                ];
+                let mut spans = vec![Span::styled(
+                    format!("{}[{}] {}", indent, checkbox, td.task.title),
+                    Style::default()
+                        .add_modifier(Modifier::CROSSED_OUT)
+                        .fg(Color::DarkGray),
+                )];
+                spans.extend(date_span);
                 if let Some(due_date_span) = due_date_span {
                     spans.push(due_date_span);
                 }
                 ListItem::new(Line::from(spans))
             } else {
-                let mut spans = vec![task_span, date_span];
+                let mut spans = vec![task_span];
+                spans.extend(date_span);
                 if let Some(due_date_span) = due_date_span {
                     spans.push(due_date_span);
                 }
@@ -1087,6 +1103,7 @@ Actions:
   e: edit selected item
   tab: switch edit fields
   s: reverse creation-date sort
+  d: show/hide creation dates (per workspace)
   x: archive completed tasks
   c: complete/uncomplete task
   D: delete selected item

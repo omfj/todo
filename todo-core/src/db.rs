@@ -27,7 +27,7 @@ impl Database {
 
     pub async fn get_workspaces(&self) -> anyhow::Result<Vec<Workspace>> {
         let rows = sqlx::query_as::<_, Workspace>(
-            "SELECT id, name, created_at, updated_at FROM workspaces ORDER BY name",
+            "SELECT id, name, show_dates, created_at, updated_at FROM workspaces ORDER BY name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -149,6 +149,20 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        Ok(())
+    }
+
+    pub async fn set_workspace_show_dates(
+        &self,
+        workspace_id: i64,
+        show_dates: bool,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE workspaces SET show_dates = ? WHERE id = ?")
+            .bind(show_dates)
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }

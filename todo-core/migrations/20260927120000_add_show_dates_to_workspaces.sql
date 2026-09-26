@@ -1,0 +1,1 @@
+ALTER TABLE workspaces ADD COLUMN show_dates BOOLEAN NOT NULL DEFAULT 1;

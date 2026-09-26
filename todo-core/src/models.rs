@@ -7,6 +7,7 @@ use sqlx::FromRow;
 pub struct Workspace {
     pub id: i64,
     pub name: String,
+    pub show_dates: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
