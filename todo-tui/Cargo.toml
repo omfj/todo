@@ -13,5 +13,6 @@ chrono = { workspace = true }
 clap = { workspace = true }
 ratatui = { workspace = true }
 tokio = { workspace = true }
+todo-cli = { path = "../todo-cli" }
 todo-core = { path = "../todo-core" }
 tui-input = { workspace = true }

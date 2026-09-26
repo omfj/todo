@@ -99,6 +99,28 @@ impl Database {
         Ok(result.last_insert_rowid())
     }
 
+    pub async fn get_task(&self, task_id: i64) -> anyhow::Result<Option<Task>> {
+        let row = sqlx::query_as::<_, Task>(
+            "SELECT id, title, description, completed, archived, due_date, workspace_id, parent_task_id, created_at, updated_at
+             FROM tasks WHERE id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row)
+    }
+
+    pub async fn set_task_completed(&self, task_id: i64, completed: bool) -> anyhow::Result<()> {
+        sqlx::query("UPDATE tasks SET completed = ? WHERE id = ?")
+            .bind(completed)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn toggle_task_completion(&self, task_id: i64) -> anyhow::Result<()> {
         sqlx::query!(
             "UPDATE tasks SET completed = NOT completed WHERE id = ?",

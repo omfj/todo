@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["todo-core", "todo-tui"]
+members = ["todo-cli", "todo-core", "todo-tui"]
 
 [workspace.dependencies]
 anyhow = "1.0.99"

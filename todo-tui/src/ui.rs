@@ -19,10 +19,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 
 use crate::command::Command;
-use todo_core::{Database, Task, Workspace, WorkspaceStats};
+use todo_core::{Database, STATE_LAST_WORKSPACE_ID, Task, Workspace, WorkspaceStats};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
-const STATE_WORKSPACE_ID: &str = "last_workspace_id";
 const STATE_TASK_ID: &str = "last_task_id";
 const STATE_FOCUS: &str = "last_focus";
 const STATE_SORT: &str = "sort_order";
@@ -129,7 +128,7 @@ impl App {
 
         let workspace_id = self
             .db
-            .get_state(STATE_WORKSPACE_ID)
+            .get_state(STATE_LAST_WORKSPACE_ID)
             .await?
             .and_then(|id| id.parse::<i64>().ok());
         if let Some(idx) =
@@ -176,7 +175,9 @@ impl App {
             "asc"
         };
 
-        self.db.set_state(STATE_WORKSPACE_ID, &workspace_id).await?;
+        self.db
+            .set_state(STATE_LAST_WORKSPACE_ID, &workspace_id)
+            .await?;
         self.db.set_state(STATE_TASK_ID, &task_id).await?;
         self.db.set_state(STATE_FOCUS, focus).await?;
         self.db.set_state(STATE_SORT, sort).await?;
