@@ -1,5 +1,6 @@
 use todo_core::Database;
 
+mod command;
 mod ui;
 
 #[tokio::main]

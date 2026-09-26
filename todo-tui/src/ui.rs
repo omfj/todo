@@ -5,7 +5,7 @@ use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
         cursor::SetCursorStyle,
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+        event::{self, DisableMouseCapture, EnableMouseCapture, Event},
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
@@ -18,6 +18,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::io;
 
+use crate::command::Command;
 use todo_core::{Database, Task, Workspace, WorkspaceStats};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
@@ -637,6 +638,10 @@ impl App {
     }
 
     pub async fn confirm_delete(&mut self) -> Result<()> {
+        if self.delete_target.is_none() {
+            return Ok(());
+        }
+
         match self.focus {
             Focus::Workspaces => {
                 if let Some(selected) = self.workspace_state.selected()
@@ -680,6 +685,93 @@ impl App {
     pub fn cancel_delete_confirm(&mut self) {
         self.input_mode = InputMode::Normal;
         self.delete_target = None;
+    }
+
+    pub async fn execute(&mut self, command: Command) -> Result<()> {
+        if !command.allowed_in(&self.input_mode) {
+            return Ok(());
+        }
+
+        match command {
+            Command::Quit => {}
+            Command::MoveUp => match self.focus {
+                Focus::Workspaces => self.previous_workspace().await?,
+                Focus::Tasks => self.previous_task(),
+            },
+            Command::MoveDown => match self.focus {
+                Focus::Workspaces => self.next_workspace().await?,
+                Focus::Tasks => self.next_task(),
+            },
+            Command::FocusWorkspaces => self.focus = Focus::Workspaces,
+            Command::FocusTasks => self.focus = Focus::Tasks,
+            Command::ToggleFocus => {
+                self.focus = match self.focus {
+                    Focus::Workspaces => Focus::Tasks,
+                    Focus::Tasks => Focus::Workspaces,
+                };
+            }
+            Command::Add => self.start_creating_task(),
+            Command::AddSubtask => {
+                if self.focus == Focus::Tasks {
+                    self.start_creating_subtask();
+                } else {
+                    self.start_creating_task();
+                }
+            }
+            Command::ToggleComplete => self.toggle_current_task_completion().await?,
+            Command::Edit => self.start_rename(),
+            Command::StartSearch => self.start_search(),
+            Command::ClearSearch => {
+                if !self.search_query.is_empty() {
+                    self.cancel_search();
+                }
+            }
+            Command::ToggleSort => self.toggle_sort_order(),
+            Command::ArchiveCompleted => self.archive_completed_tasks().await?,
+            Command::Delete => self.start_delete_confirm(),
+            Command::ShowHelp => self.show_help(),
+            Command::HideHelp => self.hide_help(),
+            Command::SaveEdit => self.finish_rename().await?,
+            Command::CancelEdit => self.cancel_rename(),
+            Command::NextEditField => {
+                if self.focus == Focus::Tasks {
+                    self.toggle_edit_field();
+                }
+            }
+            Command::SelectTitleField => {
+                if self.focus == Focus::Tasks {
+                    self.edit_field = EditField::Title;
+                }
+            }
+            Command::SelectDueDateField => {
+                if self.focus == Focus::Tasks {
+                    self.edit_field = EditField::DueDate;
+                }
+            }
+            Command::ConfirmCreate => self.finish_creating().await?,
+            Command::CancelCreate => self.cancel_creating(),
+            Command::ConfirmSearch => self.finish_search(),
+            Command::CancelSearch => self.cancel_search(),
+            Command::ConfirmDelete => self.confirm_delete().await?,
+            Command::CancelDelete => self.cancel_delete_confirm(),
+            Command::TextInput(key) => {
+                let event = Event::Key(key);
+                match self.input_mode {
+                    InputMode::Insert => {
+                        self.active_edit_input_mut().handle_event(&event);
+                    }
+                    InputMode::Creating => {
+                        self.input_buffer.handle_event(&event);
+                    }
+                    InputMode::Search => {
+                        self.input_buffer.handle_event(&event);
+                        self.update_search();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn show_help(&mut self) {
@@ -736,133 +828,13 @@ async fn run_app_loop(
             }
         }
 
-        if let Event::Key(key) = event::read()? {
-            match app.input_mode {
-                InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Down | KeyCode::Char('j') => match app.focus {
-                        Focus::Workspaces => app.next_workspace().await?,
-                        Focus::Tasks => app.next_task(),
-                    },
-                    KeyCode::Up | KeyCode::Char('k') => match app.focus {
-                        Focus::Workspaces => app.previous_workspace().await?,
-                        Focus::Tasks => app.previous_task(),
-                    },
-                    KeyCode::Right | KeyCode::Char('l') => {
-                        app.focus = Focus::Tasks;
-                    }
-                    KeyCode::Left | KeyCode::Char('h') => {
-                        app.focus = Focus::Workspaces;
-                    }
-                    KeyCode::Tab => {
-                        app.focus = match app.focus {
-                            Focus::Workspaces => Focus::Tasks,
-                            Focus::Tasks => Focus::Workspaces,
-                        };
-                    }
-                    KeyCode::Esc => {
-                        if !app.search_query.is_empty() {
-                            app.cancel_search();
-                        }
-                    }
-                    KeyCode::Char('A') => {
-                        if app.focus == Focus::Tasks {
-                            app.start_creating_subtask();
-                        } else {
-                            app.start_creating_task();
-                        }
-                    }
-                    KeyCode::Char('a') => {
-                        app.start_creating_task();
-                    }
-                    KeyCode::Char('c') | KeyCode::Char(' ') => {
-                        app.toggle_current_task_completion().await?;
-                    }
-                    KeyCode::Char('e') => {
-                        app.start_rename();
-                    }
-                    KeyCode::Char('/') => {
-                        app.start_search();
-                    }
-                    KeyCode::Char('s') => {
-                        app.toggle_sort_order();
-                    }
-                    KeyCode::Char('x') => {
-                        app.archive_completed_tasks().await?;
-                    }
-                    KeyCode::Char('D') => {
-                        app.start_delete_confirm();
-                    }
-                    KeyCode::Char('?') => {
-                        app.show_help();
-                    }
-                    _ => {}
-                },
-                InputMode::Insert => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_rename().await?;
-                    }
-                    KeyCode::Esc => {
-                        app.cancel_rename();
-                    }
-                    KeyCode::Tab => {
-                        if app.focus == Focus::Tasks {
-                            app.toggle_edit_field();
-                        }
-                    }
-                    KeyCode::Up => {
-                        if app.focus == Focus::Tasks {
-                            app.edit_field = EditField::Title;
-                        }
-                    }
-                    KeyCode::Down => {
-                        if app.focus == Focus::Tasks {
-                            app.edit_field = EditField::DueDate;
-                        }
-                    }
-                    _ => {
-                        app.active_edit_input_mut().handle_event(&Event::Key(key));
-                    }
-                },
-                InputMode::Creating => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_creating().await?;
-                    }
-                    KeyCode::Esc => {
-                        app.cancel_creating();
-                    }
-                    _ => {
-                        app.input_buffer.handle_event(&Event::Key(key));
-                    }
-                },
-                InputMode::Search => match key.code {
-                    KeyCode::Enter => {
-                        app.finish_search();
-                    }
-                    KeyCode::Esc => {
-                        app.cancel_search();
-                    }
-                    _ => {
-                        app.input_buffer.handle_event(&Event::Key(key));
-                        app.update_search();
-                    }
-                },
-                InputMode::DeleteConfirm => match key.code {
-                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        app.confirm_delete().await?;
-                    }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        app.cancel_delete_confirm();
-                    }
-                    _ => {}
-                },
-                InputMode::Help => match key.code {
-                    KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-                        app.hide_help();
-                    }
-                    _ => {}
-                },
+        if let Event::Key(key) = event::read()?
+            && let Some(command) = Command::from_key(key, &app.input_mode)
+        {
+            if command == Command::Quit {
+                return Ok(());
             }
+            app.execute(command).await?;
         }
     }
 }
