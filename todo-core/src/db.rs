@@ -165,6 +165,28 @@ impl Database {
         Ok(())
     }
 
+    pub async fn get_state(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let value = sqlx::query_scalar::<_, String>("SELECT value FROM app_state WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(value)
+    }
+
+    pub async fn set_state(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO app_state (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn delete_task(&self, task_id: i64) -> anyhow::Result<()> {
         sqlx::query!("DELETE FROM tasks WHERE id = ?", task_id)
             .execute(&self.pool)

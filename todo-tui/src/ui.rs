@@ -21,6 +21,11 @@ use std::io;
 use todo_core::{Database, Task, Workspace, WorkspaceStats};
 use tui_input::{Input, backend::crossterm::EventHandler};
 
+const STATE_WORKSPACE_ID: &str = "last_workspace_id";
+const STATE_TASK_ID: &str = "last_task_id";
+const STATE_FOCUS: &str = "last_focus";
+const STATE_SORT: &str = "sort_order";
+
 #[derive(Debug, Clone)]
 pub struct TaskDisplay {
     pub task: Task,
@@ -105,6 +110,75 @@ impl App {
             self.selected_workspace = Some(0);
             self.load_tasks_for_selected_workspace().await?;
         }
+        Ok(())
+    }
+
+    pub async fn restore_session(&mut self) -> Result<()> {
+        if let Some(sort) = self.db.get_state(STATE_SORT).await? {
+            self.sort_created_desc = sort != "asc";
+        }
+
+        if let Some(focus) = self.db.get_state(STATE_FOCUS).await? {
+            self.focus = if focus == "workspaces" {
+                Focus::Workspaces
+            } else {
+                Focus::Tasks
+            };
+        }
+
+        let workspace_id = self
+            .db
+            .get_state(STATE_WORKSPACE_ID)
+            .await?
+            .and_then(|id| id.parse::<i64>().ok());
+        if let Some(idx) =
+            workspace_id.and_then(|id| self.workspaces.iter().position(|w| w.id == id))
+        {
+            self.workspace_state.select(Some(idx));
+            self.selected_workspace = Some(idx);
+        }
+        self.load_tasks_for_selected_workspace().await?;
+
+        let task_id = self
+            .db
+            .get_state(STATE_TASK_ID)
+            .await?
+            .and_then(|id| id.parse::<i64>().ok());
+        if let Some(idx) =
+            task_id.and_then(|id| self.task_displays.iter().position(|td| td.task.id == id))
+        {
+            self.task_state.select(Some(idx));
+        }
+
+        Ok(())
+    }
+
+    pub async fn save_session(&self) -> Result<()> {
+        let workspace_id = self
+            .selected_workspace
+            .and_then(|idx| self.workspaces.get(idx))
+            .map(|w| w.id.to_string())
+            .unwrap_or_default();
+        let task_id = self
+            .task_state
+            .selected()
+            .and_then(|idx| self.task_displays.get(idx))
+            .map(|td| td.task.id.to_string())
+            .unwrap_or_default();
+        let focus = match self.focus {
+            Focus::Workspaces => "workspaces",
+            Focus::Tasks => "tasks",
+        };
+        let sort = if self.sort_created_desc {
+            "desc"
+        } else {
+            "asc"
+        };
+
+        self.db.set_state(STATE_WORKSPACE_ID, &workspace_id).await?;
+        self.db.set_state(STATE_TASK_ID, &task_id).await?;
+        self.db.set_state(STATE_FOCUS, focus).await?;
+        self.db.set_state(STATE_SORT, sort).await?;
         Ok(())
     }
 
@@ -631,8 +705,10 @@ pub async fn run_app(db: Database) -> Result<()> {
 
     let mut app = App::new(db);
     app.load_workspaces().await?;
+    app.restore_session().await?;
 
     let res = run_app_loop(&mut terminal, &mut app).await;
+    let save_res = app.save_session().await;
 
     disable_raw_mode()?;
     execute!(
@@ -646,7 +722,7 @@ pub async fn run_app(db: Database) -> Result<()> {
         println!("{err:?}");
     }
 
-    Ok(())
+    save_res
 }
 
 async fn run_app_loop(
