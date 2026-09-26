@@ -1,4 +1,4 @@
-.PHONY := check test install build clean
+.PHONY: check fix test install build clean
 
 check:
 	@cargo clippy --all-targets --all-features -- -D warnings
@@ -12,7 +12,7 @@ test:
 	@cargo test --all-targets --all-features
 
 install:
-	@cargo install --path .
+	@cargo install --path todo-tui
 
 build:
 	@cargo build --release
